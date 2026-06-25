@@ -57,6 +57,59 @@ This mirrors the [agent-browser](https://github.com/vercel-labs/agent-browser#sk
 pattern, so `npx skills add <repo>` can drop a stub that points back at
 `bctx skills get braincontext`.
 
+## MCP server (read & write from any agent)
+
+Run an MCP stdio server so Claude/Cursor/Codex read and write the same store
+natively (full CRUD; `delete` is soft-only over MCP):
+
+```bash
+bctx mcp
+```
+
+Register it with Claude Code:
+
+```bash
+claude mcp add --transport stdio bctx -- bctx mcp
+```
+
+…or in `.mcp.json`:
+
+```json
+{ "mcpServers": { "bctx": { "type": "stdio", "command": "bctx", "args": ["mcp"] } } }
+```
+
+Tools: `search_contexts`, `get_context`, `list_contexts`, `create_context`,
+`update_context`, `delete_context` — plus a `bctx://context/{id}` resource.
+
+## Export to agent files
+
+Materialize the store into the files agents already read, idempotently (a managed
+`<!-- BEGIN/END braincontext-cli -->` block; hand-written content is preserved):
+
+```bash
+bctx export --out .                  # AGENTS.md + CLAUDE.md(@AGENTS.md) + .cursor/rules/*.mdc
+bctx export --targets agents,cursor  # pick targets
+bctx export --dry-run                # show what would change
+bctx export --check                  # exit non-zero if stale (CI)
+```
+
+`AGENTS.md` is canonical (sections by kind, read by 60+ agents); `CLAUDE.md` just
+imports it via `@AGENTS.md`; each `rule` becomes one `.cursor/rules/*.mdc`.
+
+## Skill bundles (SKILL.md round-trip)
+
+Import a full Agent-Skill directory (frontmatter + `scripts/`/`references/`/`assets/`)
+into the store and reconstruct it on disk faithfully (binary assets + `chmod +x scripts/`):
+
+```bash
+bctx skill add ./my-skill            # validates name==folder (kebab) and imports
+bctx skill list                      # skills stored in the DB
+bctx skill export my-skill ./out     # writes ./out/my-skill/ back to disk
+```
+
+> `bctx skill` (singular) manages skills **stored in the database**; `bctx skills`
+> (plural) serves the CLI's **own bundled docs**.
+
 ## Development
 
 ```bash
@@ -75,10 +128,13 @@ src/
   commands/         thin handlers: parse -> validate -> call core/
   core/             shared data-access layer (single source of truth)
   migrations/       Kysely migrations (registered in code)
-  skills/           bundled-skill loader
-  lib/              small helpers (paths, stdin, formatting)
+  mcp/              MCP server (tools + resource) over core/
+  export/           AGENTS.md / CLAUDE.md / .cursor/rules renderers + managed fences
+  skillbundles/     SKILL.md parse / validate / reconstruct (filesystem)
+  skills/           bundled-skill doc loader
+  lib/              small helpers (paths, stdin, formatting, frontmatter)
 skills/braincontext/  shipped agent docs (SKILL.md + references)
 ```
 
-All surfaces go through `core/` — never raw SQL — so future surfaces (MCP server,
-markdown export) can be added without drift. See `progress.md`.
+Every surface — CLI commands, the MCP server, export, and skill bundles — goes
+through `core/`, never raw SQL, so they can't drift. See `progress.md`.

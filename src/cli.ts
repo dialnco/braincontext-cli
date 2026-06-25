@@ -1,11 +1,14 @@
 #!/usr/bin/env node
 import { Command } from 'commander'
 import { addCommand } from './commands/add'
+import { exportCommand } from './commands/export'
 import { getCommand } from './commands/get'
 import { initCommand } from './commands/init'
 import { listCommand } from './commands/list'
+import { mcpCommand } from './commands/mcp'
 import { rmCommand } from './commands/rm'
 import { searchCommand } from './commands/search'
+import { skillCommand } from './commands/skill'
 import { skillsCommand } from './commands/skills'
 import { updateCommand } from './commands/update'
 import { getVersion } from './lib/pkg'
@@ -28,6 +31,9 @@ program.addCommand(updateCommand())
 program.addCommand(rmCommand())
 program.addCommand(searchCommand())
 program.addCommand(skillsCommand())
+program.addCommand(skillCommand())
+program.addCommand(exportCommand())
+program.addCommand(mcpCommand())
 
 program.addHelpText(
   'after',

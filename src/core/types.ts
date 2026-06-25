@@ -46,13 +46,15 @@ export interface ContextHistoryTable {
   changed_at: string
 }
 
-/** Reserved for v1.5 SKILL.md bundles (sidecar scripts/assets). Unused in v1. */
+/** Sidecar files of a SKILL.md bundle (scripts/references/assets). See 0002. */
 export interface SkillFilesTable {
   id: Generated<number>
   context_id: string
   rel_path: string
-  content: string
-  is_binary: number
+  /** Raw file bytes (BLOB) so binary assets round-trip faithfully. */
+  content: Buffer
+  /** 1 if the file should be chmod +x on export (scripts/**). */
+  is_executable: number
 }
 
 /** FTS5 external-content mirror of contexts(title, body). Queried via raw SQL. */

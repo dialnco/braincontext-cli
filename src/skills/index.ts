@@ -1,5 +1,6 @@
 import { existsSync, readdirSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
+import { parseFrontmatter } from '../lib/frontmatter'
 import { packageRoot } from '../lib/root'
 
 function skillsRoot(): string {
@@ -12,17 +13,8 @@ export interface BundledSkill {
   dir: string
 }
 
-/** Minimal YAML frontmatter parser (key: value lines only) — avoids a yaml dep. */
-function parseFrontmatter(md: string): Record<string, string> {
-  const out: Record<string, string> = {}
-  const match = md.match(/^---\n([\s\S]*?)\n---/)
-  const frontmatter = match?.[1]
-  if (!frontmatter) return out
-  for (const line of frontmatter.split('\n')) {
-    const i = line.indexOf(':')
-    if (i > 0) out[line.slice(0, i).trim()] = line.slice(i + 1).trim()
-  }
-  return out
+function str(value: unknown): string {
+  return typeof value === 'string' ? value : ''
 }
 
 /** List bundled skills (each subdirectory of skills/ with a SKILL.md). */
@@ -34,8 +26,10 @@ export function listSkills(): BundledSkill[] {
     .map((e) => {
       const dir = join(root, e.name)
       const skillFile = join(dir, 'SKILL.md')
-      const fm = existsSync(skillFile) ? parseFrontmatter(readFileSync(skillFile, 'utf8')) : {}
-      return { name: fm.name ?? e.name, description: fm.description ?? '', dir }
+      const data = existsSync(skillFile)
+        ? parseFrontmatter(readFileSync(skillFile, 'utf8')).data
+        : {}
+      return { name: str(data.name) || e.name, description: str(data.description), dir }
     })
 }
 

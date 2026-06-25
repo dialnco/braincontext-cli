@@ -21,14 +21,19 @@ Stack: ESM + TypeScript · commander · better-sqlite3 + Kysely · FTS5 · ULID 
 > `ERR_PNPM_NO_GLOBAL_BIN_DIR`, run `pnpm setup` once (sets `PNPM_HOME` + PATH), then re-link.
 > Until then, run the CLI via `pnpm dev <args>` or `node dist/cli.js <args>`.
 
-## v1.5 — deferred (next up)
+## v1.5 — multi-agent surfaces (shipped)
 
-These were intentionally cut from v1 to keep it barebones. The schema + shared
-`core/` layer were designed so each can be added **without a breaking migration**.
+Stack additions: `@modelcontextprotocol/sdk@1.29.0` · `yaml@2.9.0`. Migration `0002_skill_files`. zod stays at 4.x.
 
-- [ ] **MCP server** (`bctx mcp`) exposing tools (context_search/get/list/create/update/delete) + a resource, so Claude/Cursor/Codex read the same store natively — the literal "multiple agents" promise.
-- [ ] **Markdown export** materializing `CLAUDE.md`, `AGENTS.md`, `.cursor/rules/*.mdc`, and `SKILL.md` dirs so file-only agents get context.
-- [ ] **Full DB-stored SKILL.md bundles**: use the reserved `skill_files` table for sidecar scripts/assets, enforce SKILL.md frontmatter rules (kebab name == folder), add `bctx skill add/export`.
+- [x] **MCP server** (`bctx mcp`) — stdio server with full-CRUD tools (`search/get/list/create/update_context` + soft-only `delete_context`) + a `bctx://context/{id}` resource. stdout is protocol-only; logs to stderr; long-lived DB.
+- [x] **Markdown export** (`bctx export`) — AGENTS.md (sections by kind, canonical), CLAUDE.md (`@AGENTS.md` bridge), `.cursor/rules/*.mdc` (one per rule, 3-field frontmatter). Idempotent `<!-- BEGIN/END braincontext-cli -->` fences; `--out/--targets/--dry-run/--check`.
+- [x] **Full SKILL.md bundles** (`bctx skill add|export|list`) — import a SKILL.md dir into a `kind='skill'` row + `skill_files` sidecars (BLOB + exec bit); strict `name==folder` kebab validation; faithful export with binary round-trip and `chmod +x scripts/`.
+- [x] `yaml`-based frontmatter parse/serialize (`src/lib/frontmatter.ts`); replaced the home-grown parser.
+- [x] Vitest coverage for all three (mcp / export / skillbundle / frontmatter); 18 tests passing.
+- [x] Verified end-to-end on the `dist/` bundle: export dry-run/write/check, skill add→list→export round-trip (exec bit restored), and a real `bctx mcp` stdio handshake (clean stdout, 6 tools, resource).
+
+### Still deferred (v2)
+
 - [ ] **Semantic search**: `sqlite-vec` embeddings + hybrid FTS5 + vector retrieval (RRF reranking). Store embedding model name + dimension for portability.
 - [ ] **Knowledge-graph relations** (entities/relations/observations) for connected context, à la the MCP memory server.
 - [ ] **Bidirectional markdown round-trip** so edits agents make in exported files flow back into the DB.
@@ -38,4 +43,7 @@ These were intentionally cut from v1 to keep it barebones. The schema + shared
 - **Driver:** better-sqlite3 over `node:sqlite` because the latter is still experimental on Node 22–24 and lacks migration-tool support; revisit on Node 26.
 - **Query layer:** Kysely (zero-dep, whole-query type-safety, built-in migration runner) over Drizzle for a barebones tool.
 - **Concurrency:** WAL mode + short transactions + history/soft-delete make multi-agent writes recoverable.
-- **Anti-drift rule:** every surface calls `core/`, never raw SQL.
+- **Anti-drift rule:** every surface calls `core/`, never raw SQL. (MCP, export, and skill bundles all go through `core/`.)
+- **MCP SDK:** `@modelcontextprotocol/sdk@1.29.0` (stable) supports zod 3 **and** zod 4 via its compat layer — kept zod 4, no pin. Avoided the `@modelcontextprotocol/server` 2.x alpha. Raw-shape `inputSchema` (not `z.object`). stdout reserved for protocol; all logs to stderr.
+- **Export bridge:** AGENTS.md is canonical; CLAUDE.md only imports it (`@AGENTS.md`) since Claude Code doesn't read AGENTS.md — single source of truth, no drift. Cursor `globs` emitted as an unquoted CSV string (not a YAML list), per spec.
+- **Skill storage (0002):** `skill_files.content` is BLOB + `is_executable` so binary `assets/` round-trip and `scripts/` stay executable. Table was empty everywhere → safe migration. Full frontmatter is stored losslessly in the context's `metadata` JSON.
