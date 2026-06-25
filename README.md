@@ -96,6 +96,25 @@ bctx export --check                  # exit non-zero if stale (CI)
 `AGENTS.md` is canonical (sections by kind, read by 60+ agents); `CLAUDE.md` just
 imports it via `@AGENTS.md`; each `rule` becomes one `.cursor/rules/*.mdc`.
 
+## Round-trip / manual sync (markdown ⇄ DB)
+
+The files above are one-directional (DB → agents). For editing context **as markdown
+and syncing edits back**, use the `store` target — one identity-bearing `.md` per
+context — paired with `bctx import` (a manual, explicit action; never auto-sync):
+
+```bash
+bctx export --targets store --out ./ctx   # write one <slug>.md per context (frontmatter id/kind/tags + body)
+# …edit / add / delete files in ./ctx…
+bctx import ./ctx --dry-run               # preview: create / update / prune
+bctx import ./ctx                         # apply: matches by frontmatter id; new files create
+bctx import ./ctx --prune                 # also soft-delete contexts whose file is gone
+```
+
+Safe by default: `import` never deletes unless `--prune`, and `--prune` is **scoped to
+the namespaces present in the files** so a partial export can't remove unrelated
+contexts. Syncs title/body/tags; `id`/`kind`/`namespace`/`scope` are stable identity.
+(Wiki pages round-trip separately via `bctx wiki export/import`.)
+
 ## Skill bundles (SKILL.md round-trip)
 
 Import a full Agent-Skill directory (frontmatter + `scripts/`/`references/`/`assets/`)

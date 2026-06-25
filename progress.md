@@ -46,10 +46,21 @@ Replaces the previously-deferred "semantic search (vectors)" and "knowledge-grap
 - [x] Vitest: wiki / lint / export-import / regression-guard / mcp-wiki (31 tests passing).
 - [x] Verified end-to-end on the `dist/` bundle: ingest→pages→links→lint, list regression guard, index/log, export→import, and a real `bctx mcp` wiki-tool handshake.
 
-### Still deferred (v3)
+## v3 — Bidirectional markdown round-trip (shipped)
 
-- [ ] **Bidirectional markdown round-trip** for the *non-wiki* context export (edits in CLAUDE.md/AGENTS.md flowing back to the DB). The wiki already round-trips via `wiki export/import`.
-- [ ] Optional vector/semantic retrieval (`sqlite-vec`) — explicitly out of scope per the wiki direction; could augment `wiki search` later.
+A **manual** files→DB sync (never auto-sync) for non-wiki contexts.
+
+- [x] **`store` export format** — `bctx export --targets store --out ./ctx` writes one identity-bearing `.md` per context (frontmatter `id/kind/namespace/scope/title/tags/agent` + body). Reuses the `PlannedFile` diff machinery (`--dry-run`/`--check`). `store` is opt-in (not in the default targets); wiki pages + deleted are excluded by `selectContexts`.
+- [x] **`bctx import <dir>`** — matches files→contexts by frontmatter **id**: edits → update (title/body/tags via add/remove diff, metadata merged), new files (no id) → create (honoring a provided id), missing files → **kept by default**, soft-deleted only with `--prune`. `--prune` is **scoped to the namespaces present in the files** (a partial export never deletes other namespaces). `--dry-run` previews; ids resolving to wiki pages are skipped.
+- [x] One `core` change: optional `id` on `CreateInput` (`createContext` uses `input.id ?? ulid()`).
+- [x] New files: `src/export/store.ts`, `src/sync/import.ts`, `src/commands/import.ts`; edits to `export/write.ts` (+`store` target), `commands/export.ts`, `cli.ts`.
+- [x] Vitest `test/sync.test.ts` (round-trip id-honored, edit→update, create, namespace-scoped prune, dry-run, wiki-safety); 36 tests passing.
+- [x] Verified end-to-end on the `dist/` bundle: export store → edit a file → dry-run → import (get reflects edit) → delete file kept → `--prune` soft-deletes; plain `list`/wiki unaffected.
+
+### Still deferred (v4)
+
+- [ ] Optional vector/semantic retrieval (`sqlite-vec`) — out of scope per the wiki direction; could augment `wiki search` later.
+- [ ] `store` round-trip currently syncs title/body/tags (+merge metadata); `kind`/`namespace`/`scope` are treated as immutable identity. Could extend to sync structural fields if needed.
 
 ## Notes / decisions
 

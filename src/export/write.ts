@@ -3,9 +3,12 @@ import { dirname, join } from 'node:path'
 import type { Context } from '../core/contexts'
 import { applyManagedBlock } from './managed'
 import { renderAgentsBody, renderClaudeBody, renderMdc } from './render'
+import { renderContextFile } from './store'
 
-export type Target = 'agents' | 'claude' | 'cursor'
+export type Target = 'agents' | 'claude' | 'cursor' | 'store'
 export const ALL_TARGETS: Target[] = ['agents', 'claude', 'cursor']
+/** `store` is the round-trippable per-context dir; opt-in (not in ALL_TARGETS). */
+export const ALL_TARGET_NAMES: Target[] = ['agents', 'claude', 'cursor', 'store']
 
 export interface ExportOptions {
   outDir: string
@@ -41,6 +44,16 @@ export function planExport(items: Context[], opts: ExportOptions): PlannedFile[]
     for (const c of items.filter((x) => x.kind === 'rule')) {
       const { filename, content } = renderMdc(c)
       files.push({ path: join(opts.outDir, '.cursor', 'rules', filename), content })
+    }
+  }
+  if (has('store')) {
+    const used = new Set<string>()
+    for (const c of items) {
+      const { filename, content } = renderContextFile(c)
+      let name = filename
+      for (let i = 2; used.has(name); i++) name = filename.replace(/\.md$/, `-${i}.md`)
+      used.add(name)
+      files.push({ path: join(opts.outDir, name), content })
     }
   }
   return files

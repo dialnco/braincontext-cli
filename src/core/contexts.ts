@@ -35,6 +35,8 @@ export interface CreateInput {
   metadata?: Record<string, unknown>
   pageType?: string | null
   slug?: string | null
+  /** Honor a specific id (e.g. re-creating a row from an exported file). */
+  id?: string
 }
 
 export interface ListFilters {
@@ -126,7 +128,7 @@ async function ensureTags(db: Kysely<Database>, names: string[]): Promise<number
 }
 
 export async function createContext(db: Kysely<Database>, input: CreateInput): Promise<Context> {
-  const id = ulid()
+  const id = input.id ?? ulid()
   const ts = nowIso()
   const agentSource = input.agentSource ?? null
   await db.transaction().execute(async (trx) => {

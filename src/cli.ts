@@ -3,6 +3,7 @@ import { Command } from 'commander'
 import { addCommand } from './commands/add'
 import { exportCommand } from './commands/export'
 import { getCommand } from './commands/get'
+import { importCommand } from './commands/import'
 import { initCommand } from './commands/init'
 import { listCommand } from './commands/list'
 import { mcpCommand } from './commands/mcp'
@@ -42,6 +43,7 @@ program.addCommand(searchCommand())
 program.addCommand(skillsCommand())
 program.addCommand(skillCommand())
 program.addCommand(exportCommand())
+program.addCommand(importCommand())
 program.addCommand(mcpCommand())
 
 program.addHelpText(

@@ -39,6 +39,22 @@ bctx rm <id>            # soft-delete: hidden from list/search, still in history
 bctx rm <id> --hard     # permanent
 ```
 
+## Edit as markdown, then sync back (manual round-trip)
+
+Export each context as an editable `.md` file, edit them, then pull changes back into
+the store. This is a **manual** action (never automatic):
+
+```bash
+bctx export --targets store --out ./ctx   # one <slug>.md per context (frontmatter id + body)
+# …edit / add / delete files in ./ctx…
+bctx import ./ctx --dry-run               # preview create/update/prune
+bctx import ./ctx                         # apply (matched by frontmatter id; new files create)
+bctx import ./ctx --prune                 # also soft-delete contexts whose file was removed
+```
+
+Safe by default: nothing is deleted without `--prune`, and `--prune` only affects the
+namespaces present in the files.
+
 ## Agent etiquette
 
 - Scope writes with `--namespace <project>` so context does not leak across projects.

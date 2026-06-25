@@ -4,18 +4,19 @@ import { z } from 'zod'
 import { withDb } from '../core/db'
 import { KINDS, SCOPES } from '../core/types'
 import { selectContexts } from '../export/select'
-import { ALL_TARGETS, runExport, type Target } from '../export/write'
+import { ALL_TARGET_NAMES, ALL_TARGETS, runExport, type Target } from '../export/write'
 import { dbOptsFrom } from './_shared'
 
 export function exportCommand(): Command {
   return new Command('export')
     .description(
-      'Export stored context to agent files (AGENTS.md, CLAUDE.md, .cursor/rules/*.mdc).',
+      'Export stored context to agent files (AGENTS.md, CLAUDE.md, .cursor/rules/*.mdc), ' +
+        'or to a round-trippable per-context dir (--targets store, paired with `bctx import`).',
     )
-    .option('--out <dir>', 'output directory', '.')
+    .option('--out <dir>', 'output directory (use a dedicated dir for --targets store)', '.')
     .option(
       '--targets <list>',
-      `comma-separated subset of: ${ALL_TARGETS.join(',')}`,
+      `comma-separated subset of: ${ALL_TARGET_NAMES.join(',')}`,
       ALL_TARGETS.join(','),
     )
     .option('--namespace <ns>', 'filter by namespace')
@@ -31,7 +32,7 @@ export function exportCommand(): Command {
       const targets = String(opts.targets)
         .split(',')
         .map((s) => s.trim())
-        .filter((t): t is Target => (ALL_TARGETS as string[]).includes(t))
+        .filter((t): t is Target => (ALL_TARGET_NAMES as string[]).includes(t))
 
       const items = await withDb(dbOptsFrom(command), (db) =>
         selectContexts(db, {
