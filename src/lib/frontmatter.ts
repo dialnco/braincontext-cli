@@ -1,6 +1,7 @@
 import { parse as parseYaml, stringify as stringifyYaml } from 'yaml'
 
-const FM = /^---\n([\s\S]*?)\n---\n?([\s\S]*)$/
+// Tolerate CRLF line endings and a closing `---` with trailing spaces.
+const FM = /^---\r?\n([\s\S]*?)\r?\n---[ \t]*\r?\n?([\s\S]*)$/
 
 export interface Frontmatter<T = Record<string, unknown>> {
   data: T
@@ -14,8 +15,9 @@ export interface Frontmatter<T = Record<string, unknown>> {
  * must be lenient should catch).
  */
 export function parseFrontmatter<T = Record<string, unknown>>(md: string): Frontmatter<T> {
-  const m = md.match(FM)
-  if (!m) return { data: {} as T, body: md }
+  const text = md.replace(/^\uFEFF/, '') // strip a leading BOM
+  const m = text.match(FM)
+  if (!m) return { data: {} as T, body: text }
   const data = (parseYaml(m[1] ?? '') ?? {}) as T
   return { data, body: m[2] ?? '' }
 }

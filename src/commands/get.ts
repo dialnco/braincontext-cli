@@ -1,8 +1,7 @@
 import { Command } from 'commander'
-import { getContext } from '../core/contexts'
 import { withDb } from '../core/db'
 import { formatContext } from '../lib/format'
-import { dbOptsFrom } from './_shared'
+import { dbOptsFrom, requireContext } from './_shared'
 
 export function getCommand(): Command {
   return new Command('get')
@@ -10,7 +9,7 @@ export function getCommand(): Command {
     .argument('<id>', 'context id (ULID)')
     .option('--json', 'output JSON')
     .action(async (id: string, opts, command: Command) => {
-      const ctx = await withDb(dbOptsFrom(command), (db) => getContext(db, id))
+      const ctx = await withDb(dbOptsFrom(command), (db) => requireContext(db, id))
       if (!ctx) {
         console.error(`No context found with id ${id}`)
         process.exitCode = 1

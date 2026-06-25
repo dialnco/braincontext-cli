@@ -37,6 +37,9 @@ export interface CreateInput {
   slug?: string | null
   /** Honor a specific id (e.g. re-creating a row from an exported file). */
   id?: string
+  /** Preserve provenance timestamps on re-create (default: now). */
+  createdAt?: string
+  updatedAt?: string
 }
 
 export interface ListFilters {
@@ -145,8 +148,8 @@ export async function createContext(db: Kysely<Database>, input: CreateInput): P
         metadata: JSON.stringify(input.metadata ?? {}),
         page_type: input.pageType ?? null,
         slug: input.slug ?? null,
-        created_at: ts,
-        updated_at: ts,
+        created_at: input.createdAt ?? ts,
+        updated_at: input.updatedAt ?? ts,
         deleted_at: null,
       })
       .execute()
@@ -327,40 +330,62 @@ export async function deleteContext(
   return true
 }
 
+/** Quote each whitespace term so arbitrary input is a valid FTS5 MATCH expression. */
+function sanitizeFtsQuery(query: string): string {
+  const tokens = query.match(/\S+/g) ?? []
+  return tokens.map((t) => `"${t.replace(/"/g, '""')}"`).join(' ')
+}
+
 export async function searchContexts(
   db: Kysely<Database>,
   query: string,
   filters: ListFilters = {},
 ): Promise<Context[]> {
-  const conditions = [sql`contexts_fts MATCH ${query}`, sql`c.deleted_at IS NULL`]
-  const pageScope = filters.pageScope ?? 'context'
-  if (pageScope === 'context') conditions.push(sql`c.page_type IS NULL`)
-  else if (pageScope === 'wiki') conditions.push(sql`c.page_type IS NOT NULL`)
-  if (filters.namespace) conditions.push(sql`c.namespace = ${filters.namespace}`)
-  if (filters.kind) conditions.push(sql`c.kind = ${filters.kind}`)
-  if (filters.scope) conditions.push(sql`c.scope = ${filters.scope}`)
-  if (filters.agentSource) conditions.push(sql`c.agent_source = ${filters.agentSource}`)
-  if (filters.tag) {
-    conditions.push(
-      sql`c.id IN (
-        SELECT ct.context_id FROM context_tags ct
-        JOIN tags t ON t.id = ct.tag_id
-        WHERE t.name = ${filters.tag}
-      )`,
-    )
-  }
-  const where = sql.join(conditions, sql` AND `)
   const limit = filters.limit ?? 50
 
-  const result = await sql<ContextRow>`
-    SELECT c.* FROM contexts c
-    JOIN contexts_fts ON contexts_fts.rowid = c.rowid
-    WHERE ${where}
-    ORDER BY bm25(contexts_fts)
-    LIMIT ${limit}
-  `.execute(db)
+  const run = async (matchExpr: string): Promise<ContextRow[]> => {
+    const conditions = [sql`contexts_fts MATCH ${matchExpr}`]
+    if (!filters.includeDeleted) conditions.push(sql`c.deleted_at IS NULL`)
+    const pageScope = filters.pageScope ?? 'context'
+    if (pageScope === 'context') conditions.push(sql`c.page_type IS NULL`)
+    else if (pageScope === 'wiki') conditions.push(sql`c.page_type IS NOT NULL`)
+    if (filters.namespace) conditions.push(sql`c.namespace = ${filters.namespace}`)
+    if (filters.kind) conditions.push(sql`c.kind = ${filters.kind}`)
+    if (filters.scope) conditions.push(sql`c.scope = ${filters.scope}`)
+    if (filters.agentSource) conditions.push(sql`c.agent_source = ${filters.agentSource}`)
+    if (filters.tag) {
+      conditions.push(
+        sql`c.id IN (
+          SELECT ct.context_id FROM context_tags ct
+          JOIN tags t ON t.id = ct.tag_id
+          WHERE t.name = ${filters.tag}
+        )`,
+      )
+    }
+    const where = sql.join(conditions, sql` AND `)
+    const result = await sql<ContextRow>`
+      SELECT c.* FROM contexts c
+      JOIN contexts_fts ON contexts_fts.rowid = c.rowid
+      WHERE ${where}
+      ORDER BY bm25(contexts_fts)
+      LIMIT ${limit}
+    `.execute(db)
+    return result.rows
+  }
 
-  const rows = result.rows
+  // Try the query as written (supports FTS5 operators); on a syntax error fall
+  // back to a sanitized term-quoted query so ordinary input ("C++", "a:b") works.
+  let rows: ContextRow[]
+  try {
+    rows = await run(query)
+  } catch {
+    try {
+      rows = await run(sanitizeFtsQuery(query))
+    } catch {
+      return []
+    }
+  }
+
   const tagMap = await tagsByContext(
     db,
     rows.map((r) => r.id),

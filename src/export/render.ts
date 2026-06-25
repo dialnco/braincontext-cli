@@ -42,10 +42,15 @@ function slug(s: string): string {
   )
 }
 
-/** A plain YAML scalar, quoted only when it would otherwise be ambiguous. */
+/** A plain YAML scalar, quoted (valid double-quoted YAML) when it would be ambiguous. */
 function yamlScalar(value: string): string {
   const v = value.trim()
-  const needsQuote = /:\s/.test(v) || /^[!&*?{}[\],#|>@`"'%-]/.test(v) || v === ''
+  const needsQuote =
+    /:(\s|$)/.test(v) ||
+    /\s#/.test(v) ||
+    /[\r\n]/.test(v) ||
+    /^[!&*?{}[\],#|>@`"'%-]/.test(v) ||
+    v === ''
   return needsQuote ? JSON.stringify(v) : v
 }
 
@@ -59,11 +64,14 @@ export function renderMdc(c: Context): { filename: string; content: string } {
     .replace(/\s+/g, ' ')
     .trim()
     .slice(0, 200)
-  const globs = typeof c.metadata.globs === 'string' ? c.metadata.globs.trim() : ''
+  // Cursor requires `globs` as an unquoted CSV string — collapse to a single line
+  // so a newline can't inject extra frontmatter keys.
+  const globs =
+    typeof c.metadata.globs === 'string' ? c.metadata.globs.replace(/[\r\n]+/g, ' ').trim() : ''
 
   const fm: string[] = ['---']
   if (description) fm.push(`description: ${yamlScalar(description)}`)
-  if (globs) fm.push(`globs: ${globs}`) // intentionally unquoted CSV
+  if (globs) fm.push(`globs: ${globs}`) // intentionally unquoted CSV (single-line)
   fm.push('alwaysApply: false', '---', '')
 
   const content = `${fm.join('\n')}\n${c.body.trim()}\n`

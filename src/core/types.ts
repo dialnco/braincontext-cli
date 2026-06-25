@@ -32,16 +32,16 @@ export const AUTHORED_PAGE_TYPES = [
   'analysis',
 ] as const
 
-/** Typed link relations. `references` is the channel auto-derived from [[..]]. */
-export const LINK_TYPES = [
-  'references',
-  'relates',
-  'supersedes',
-  'part-of',
-  'mentions',
-  'source',
-] as const
+/**
+ * User-selectable link relations. The reserved `references` channel
+ * (auto-derived from [[..]] in page bodies) is intentionally NOT here, so
+ * explicit links never collide with — and get clobbered by — body re-sync.
+ */
+export const LINK_TYPES = ['relates', 'supersedes', 'part-of', 'mentions', 'source'] as const
 export type LinkType = (typeof LINK_TYPES)[number]
+
+/** The reserved auto-derived link channel (managed by syncBodyLinks). */
+export const REFERENCES_LINK = 'references'
 
 export interface ContextsTable {
   id: string

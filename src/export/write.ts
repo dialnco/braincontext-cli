@@ -41,9 +41,13 @@ export function planExport(items: Context[], opts: ExportOptions): PlannedFile[]
   if (has('agents')) files.push(managed('AGENTS.md', renderAgentsBody(items)))
   if (has('claude')) files.push(managed('CLAUDE.md', renderClaudeBody()))
   if (has('cursor')) {
+    const used = new Set<string>()
     for (const c of items.filter((x) => x.kind === 'rule')) {
       const { filename, content } = renderMdc(c)
-      files.push({ path: join(opts.outDir, '.cursor', 'rules', filename), content })
+      let name = filename
+      for (let i = 2; used.has(name); i++) name = filename.replace(/\.mdc$/, `-${i}.mdc`)
+      used.add(name)
+      files.push({ path: join(opts.outDir, '.cursor', 'rules', name), content })
     }
   }
   if (has('store')) {

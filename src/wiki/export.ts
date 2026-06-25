@@ -1,4 +1,4 @@
-import { mkdirSync, writeFileSync } from 'node:fs'
+import { mkdirSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import type { Kysely } from 'kysely'
 import type { Context } from '../core/contexts'
@@ -60,6 +60,7 @@ export async function exportWiki(db: Kysely<Database>, outDir: string): Promise<
 
   const files: string[] = []
   for (const p of pages) {
+    if (p.pageType === 'index') continue // the catalog is generated as index.md
     const fm: Record<string, unknown> = {
       title: p.title ?? p.slug ?? p.id,
       type: p.pageType,
@@ -92,6 +93,13 @@ export async function exportWiki(db: Kysely<Database>, outDir: string): Promise<
   }
   writeFileSync(join(outDir, 'log.md'), `${logLines.join('\n').trim()}\n`, 'utf8')
   files.push('log.md')
+
+  // The export dir is a full materialization of the wiki: remove stale .md files
+  // for pages that no longer exist, so a deleted page can't resurrect on re-import.
+  const keep = new Set(files)
+  for (const existing of readdirSync(outDir)) {
+    if (existing.endsWith('.md') && !keep.has(existing)) rmSync(join(outDir, existing))
+  }
 
   return { files }
 }

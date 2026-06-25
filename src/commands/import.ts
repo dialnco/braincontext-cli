@@ -11,7 +11,8 @@ export function importCommand(): Command {
         '(inverse of `export --targets store`). Matches files to contexts by frontmatter id.',
     )
     .argument('<dir>', 'directory of per-context .md files (from `bctx export --targets store`)')
-    .option('--prune', 'soft-delete contexts whose file is gone (scoped to the namespaces present)')
+    .option('--prune', 'soft-delete contexts whose file is gone (scoped to the export manifest)')
+    .option('--namespace <ns>', 'scope --prune to this namespace when there is no export manifest')
     .option('--dry-run', 'preview changes without writing')
     .option('--agent <name>', 'attribute these sync writes to an agent')
     .option('--json', 'output JSON')
@@ -21,6 +22,7 @@ export function importCommand(): Command {
           prune: Boolean(opts.prune),
           dryRun: Boolean(opts.dryRun),
           agentSource: opts.agent ?? null,
+          pruneNamespace: opts.namespace,
         }),
       )
 

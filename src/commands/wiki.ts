@@ -2,7 +2,7 @@ import { basename, resolve } from 'node:path'
 import { Command } from 'commander'
 import type { Kysely } from 'kysely'
 import { z } from 'zod'
-import type { Context } from '../core/contexts'
+import { type Context, deleteContext } from '../core/contexts'
 import { withDb } from '../core/db'
 import { AUTHORED_PAGE_TYPES, type Database, LINK_TYPES } from '../core/types'
 import {
@@ -24,7 +24,7 @@ import { formatList } from '../lib/format'
 import { resolveBody } from '../lib/stdin'
 import { exportWiki, renderIndexMarkdown } from '../wiki/export'
 import { importWiki } from '../wiki/import'
-import { dbOptsFrom, splitCsv } from './_shared'
+import { dbOptsFrom, parsePositiveInt, splitCsv } from './_shared'
 
 /** Resolve an `<id|title>` reference to a page. */
 async function resolvePage(db: Kysely<Database>, ref: string): Promise<Context | null> {
@@ -166,6 +166,29 @@ export function wikiCommand(): Command {
     })
 
   wiki
+    .command('rm <ref>')
+    .description('Delete a wiki page (soft by default; --hard removes it and its links).')
+    .option('--hard', 'permanently delete instead of soft-delete')
+    .option('--agent <name>', 'agent source label for this change')
+    .action(async (ref: string, opts, command: Command) => {
+      await withDb(dbOptsFrom(command), async (db) => {
+        const page = await resolvePage(db, ref)
+        if (!page) {
+          console.error(`No wiki page matching "${ref}".`)
+          process.exitCode = 1
+          return
+        }
+        await deleteContext(db, page.id, {
+          hard: Boolean(opts.hard),
+          agentSource: opts.agent ?? null,
+        })
+        console.log(
+          `${opts.hard ? 'Hard-deleted' : 'Soft-deleted'} page "${page.title}" (${page.id})`,
+        )
+      })
+    })
+
+  wiki
     .command('backlinks <ref>')
     .description('List pages that link to this page.')
     .option('--json', 'output JSON')
@@ -196,7 +219,7 @@ export function wikiCommand(): Command {
         searchPages(db, query, {
           namespace: opts.namespace,
           pageType: opts.type,
-          limit: opts.limit ? Number(opts.limit) : undefined,
+          limit: parsePositiveInt(opts.limit, '--limit'),
         }),
       )
       console.log(opts.json ? JSON.stringify(items, null, 2) : formatList(items))
@@ -228,7 +251,7 @@ export function wikiCommand(): Command {
     .option('--json', 'output JSON')
     .action(async (opts, command: Command) => {
       const rows = await withDb(dbOptsFrom(command), (db) =>
-        listLog(db, { limit: Number(opts.tail) }),
+        listLog(db, { limit: parsePositiveInt(opts.tail, '--tail') ?? 20 }),
       )
       if (opts.json) {
         console.log(JSON.stringify(rows, null, 2))

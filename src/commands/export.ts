@@ -5,7 +5,8 @@ import { withDb } from '../core/db'
 import { KINDS, SCOPES } from '../core/types'
 import { selectContexts } from '../export/select'
 import { ALL_TARGET_NAMES, ALL_TARGETS, runExport, type Target } from '../export/write'
-import { dbOptsFrom } from './_shared'
+import { writeExportManifest } from '../sync/import'
+import { dbOptsFrom, parsePositiveInt } from './_shared'
 
 export function exportCommand(): Command {
   return new Command('export')
@@ -41,16 +42,28 @@ export function exportCommand(): Command {
           scope: opts.scope ? z.enum(SCOPES).parse(opts.scope) : undefined,
           tag: opts.tag,
           agentSource: opts.agent,
-          limit: opts.limit ? Number(opts.limit) : undefined,
+          limit: parsePositiveInt(opts.limit, '--limit'),
         }),
       )
 
+      const outDir = resolve(opts.out)
       const result = runExport(items, {
-        outDir: resolve(opts.out),
+        outDir,
         targets,
         dryRun: Boolean(opts.dryRun),
         check: Boolean(opts.check),
       })
+
+      // Record the export's filter scope so `import --prune` can mirror it safely.
+      if (targets.includes('store') && !opts.dryRun && !opts.check) {
+        writeExportManifest(outDir, {
+          namespace: opts.namespace,
+          kind: opts.kind,
+          scope: opts.scope,
+          tag: opts.tag,
+          agentSource: opts.agent,
+        })
+      }
 
       if (opts.json) {
         console.log(

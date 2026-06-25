@@ -1,15 +1,31 @@
-import { readdirSync, readFileSync } from 'node:fs'
+import { existsSync, readdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import type { Kysely } from 'kysely'
 import {
   createContext,
   deleteContext,
   getContext,
+  type ListFilters,
   listContexts,
   updateContext,
 } from '../core/contexts'
 import { type Database, KINDS, type Kind, SCOPES, type Scope } from '../core/types'
 import { parseFrontmatter } from '../lib/frontmatter'
+
+/** Sidecar written by `export --targets store` so `import --prune` knows the export's scope. */
+export const EXPORT_MANIFEST = '.braincontext-export.json'
+
+export interface ExportFilters {
+  namespace?: string
+  kind?: string
+  scope?: string
+  tag?: string
+  agentSource?: string
+}
+
+export function writeExportManifest(dir: string, filters: ExportFilters): void {
+  writeFileSync(join(dir, EXPORT_MANIFEST), `${JSON.stringify({ filters }, null, 2)}\n`, 'utf8')
+}
 
 interface FileEntry {
   file: string
@@ -28,9 +44,11 @@ export interface ImportPlan {
   create: FileEntry[]
   update: Array<{ entry: FileEntry; id: string }>
   unchanged: number
-  /** Non-wiki contexts (in the seen namespaces) with no file — removed only with --prune. */
+  /** Non-wiki contexts in the prune scope with no corresponding file (removed only with --prune). */
   missing: Array<{ id: string; title: string | null }>
   skipped: Array<{ file: string; reason: string }>
+  /** True if a prune scope could be determined (manifest present or --namespace given). */
+  pruneScopeKnown: boolean
 }
 
 export interface ImportResult {
@@ -59,15 +77,30 @@ function asStringArray(v: unknown): string[] {
 function asRecord(v: unknown): Record<string, unknown> {
   return v && typeof v === 'object' && !Array.isArray(v) ? (v as Record<string, unknown>) : {}
 }
+function stableJson(o: Record<string, unknown>): string {
+  return JSON.stringify(Object.fromEntries(Object.entries(o).sort(([a], [b]) => (a < b ? -1 : 1))))
+}
 
-function readEntries(dir: string): FileEntry[] {
-  return readdirSync(dir)
-    .filter((f) => f.endsWith('.md'))
-    .map((file) => {
+function readManifest(dir: string): ExportFilters | null {
+  const p = join(dir, EXPORT_MANIFEST)
+  if (!existsSync(p)) return null
+  try {
+    const m = JSON.parse(readFileSync(p, 'utf8'))
+    return (m && typeof m === 'object' && (m.filters as ExportFilters)) || {}
+  } catch {
+    return null
+  }
+}
+
+function readEntries(dir: string): { entries: FileEntry[]; badFiles: string[] } {
+  const entries: FileEntry[] = []
+  const badFiles: string[] = []
+  for (const file of readdirSync(dir).filter((f) => f.endsWith('.md'))) {
+    try {
       const { data, body } = parseFrontmatter<Record<string, unknown>>(
         readFileSync(join(dir, file), 'utf8'),
       )
-      return {
+      entries.push({
         file,
         id: str(data.id) ?? undefined,
         kind: asKind(data.kind),
@@ -78,8 +111,12 @@ function readEntries(dir: string): FileEntry[] {
         agent: str(data.agent),
         metadata: asRecord(data.metadata),
         body: body.replace(/\n+$/, ''),
-      }
-    })
+      })
+    } catch {
+      badFiles.push(file) // malformed frontmatter — skip, keep going
+    }
+  }
+  return { entries, badFiles }
 }
 
 function sameTags(a: string[], b: string[]): boolean {
@@ -90,17 +127,22 @@ function sameTags(a: string[], b: string[]): boolean {
 }
 
 /** Compute what `import` would do (no writes). */
-export async function planImport(db: Kysely<Database>, dir: string): Promise<ImportPlan> {
-  const entries = readEntries(dir)
+export async function planImport(
+  db: Kysely<Database>,
+  dir: string,
+  opts: { pruneNamespace?: string } = {},
+): Promise<ImportPlan> {
+  const { entries, badFiles } = readEntries(dir)
   const create: FileEntry[] = []
   const update: Array<{ entry: FileEntry; id: string }> = []
-  const skipped: Array<{ file: string; reason: string }> = []
+  const skipped: Array<{ file: string; reason: string }> = badFiles.map((file) => ({
+    file,
+    reason: 'malformed frontmatter',
+  }))
   const seenIds = new Set<string>()
-  const seenNamespaces = new Set<string>()
   let unchanged = 0
 
   for (const e of entries) {
-    seenNamespaces.add(e.namespace)
     if (e.id) {
       const existing = await getContext(db, e.id)
       if (existing) {
@@ -108,11 +150,16 @@ export async function planImport(db: Kysely<Database>, dir: string): Promise<Imp
           skipped.push({ file: e.file, reason: 'id resolves to a wiki page' })
           continue
         }
+        if (existing.deletedAt !== null) {
+          skipped.push({ file: e.file, reason: 'id resolves to a soft-deleted context' })
+          continue
+        }
         seenIds.add(e.id)
         const changed =
           (e.title ?? null) !== (existing.title ?? null) ||
           e.body.trim() !== existing.body.trim() ||
-          !sameTags(e.tags, existing.tags)
+          !sameTags(e.tags, existing.tags) ||
+          stableJson(e.metadata) !== stableJson(existing.metadata)
         if (changed) update.push({ entry: e, id: e.id })
         else unchanged++
         continue
@@ -122,24 +169,54 @@ export async function planImport(db: Kysely<Database>, dir: string): Promise<Imp
     if (e.id) seenIds.add(e.id)
   }
 
-  // Missing = non-wiki contexts in the seen namespaces with no corresponding file.
-  const missing: Array<{ id: string; title: string | null }> = []
-  for (const ns of seenNamespaces) {
-    const rows = await listContexts(db, { namespace: ns, pageScope: 'context', limit: 100000 })
-    for (const c of rows) if (!seenIds.has(c.id)) missing.push({ id: c.id, title: c.title })
+  // Determine the prune scope: the export manifest is authoritative; otherwise an
+  // explicit --namespace; otherwise prune is not safely scopable.
+  const manifest = readManifest(dir)
+  let pruneScope: ListFilters | null = null
+  if (manifest) {
+    pruneScope = {
+      namespace: manifest.namespace,
+      kind: asKind(manifest.kind),
+      scope: asScope(manifest.scope),
+      tag: manifest.tag,
+      agentSource: manifest.agentSource,
+      pageScope: 'context',
+      includeDeleted: false,
+      limit: 100000,
+    }
+  } else if (opts.pruneNamespace) {
+    pruneScope = { namespace: opts.pruneNamespace, pageScope: 'context', limit: 100000 }
   }
 
-  return { create, update, unchanged, missing, skipped }
+  const missing: Array<{ id: string; title: string | null }> = []
+  if (pruneScope) {
+    for (const c of await listContexts(db, pruneScope)) {
+      if (!seenIds.has(c.id)) missing.push({ id: c.id, title: c.title })
+    }
+  }
+
+  return { create, update, unchanged, missing, skipped, pruneScopeKnown: pruneScope !== null }
 }
 
 /** Plan, then (unless dryRun) apply: create/update always, prune only with `prune`. */
 export async function applyImport(
   db: Kysely<Database>,
   dir: string,
-  opts: { prune?: boolean; dryRun?: boolean; agentSource?: string | null } = {},
+  opts: {
+    prune?: boolean
+    dryRun?: boolean
+    agentSource?: string | null
+    pruneNamespace?: string
+  } = {},
 ): Promise<{ plan: ImportPlan; result: ImportResult }> {
-  const plan = await planImport(db, dir)
+  const plan = await planImport(db, dir, { pruneNamespace: opts.pruneNamespace })
   const agentSource = opts.agentSource ?? null
+
+  if (opts.prune && !plan.pruneScopeKnown) {
+    throw new Error(
+      `Cannot --prune: no ${EXPORT_MANIFEST} in this directory (was it produced by \`export --targets store\`?). Pass --namespace <ns> to scope the prune explicitly.`,
+    )
+  }
 
   if (!opts.dryRun) {
     for (const e of plan.create) {

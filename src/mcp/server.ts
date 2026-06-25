@@ -54,7 +54,8 @@ export function buildServer(db: Kysely<Database>): McpServer {
     },
     async ({ id }) => {
       const ctx = await getContext(db, id)
-      return ctx ? ok(ctx) : fail(`No context with id ${id}`)
+      if (!ctx || ctx.pageType !== null) return fail(`No context with id ${id}`)
+      return ok(ctx)
     },
   )
 
@@ -113,6 +114,8 @@ export function buildServer(db: Kysely<Database>): McpServer {
       },
     },
     async ({ id, title, body, addTags, removeTags, setMetadata, agent }) => {
+      const existing = await getContext(db, id)
+      if (!existing || existing.pageType !== null) return fail(`No context with id ${id}`)
       const ctx = await updateContext(db, id, {
         title,
         body,
@@ -133,6 +136,8 @@ export function buildServer(db: Kysely<Database>): McpServer {
       inputSchema: { id: z.string(), agent: z.string().optional() },
     },
     async ({ id, agent }) => {
+      const existing = await getContext(db, id)
+      if (!existing || existing.pageType !== null) return fail(`No context with id ${id}`)
       const deleted = await deleteContext(db, id, { hard: false, agentSource: agent })
       return ok({ deleted, id })
     },
@@ -156,9 +161,10 @@ export function buildServer(db: Kysely<Database>): McpServer {
     { title: 'Stored contexts', description: 'Browse stored contexts as resources.' },
     async (uri, { id }) => {
       const ctx = await getContext(db, String(id))
+      const visible = ctx && ctx.pageType === null && ctx.deletedAt === null ? ctx : null
       return {
         contents: [
-          { uri: uri.href, mimeType: 'application/json', text: JSON.stringify(ctx, null, 2) },
+          { uri: uri.href, mimeType: 'application/json', text: JSON.stringify(visible, null, 2) },
         ],
       }
     },

@@ -9,7 +9,7 @@ import {
   type UpdateInput,
   updateContext,
 } from './contexts'
-import type { Database, PageType } from './types'
+import { type Database, type PageType, REFERENCES_LINK } from './types'
 
 function nowIso(): string {
   return new Date().toISOString()
@@ -26,8 +26,51 @@ export interface CreatePageInput {
   namespace?: string
   tags?: string[]
   agentSource?: string | null
-  /** Preferred slug (used if free); otherwise derived from the title. */
+  /** Preferred slug (always normalized via slugify); otherwise derived from the title. */
   slug?: string
+  createdAt?: string
+  updatedAt?: string
+  metadata?: Record<string, unknown>
+}
+
+/**
+ * Point any pre-existing "wanted" links ([[Title]] with no target yet) at a newly
+ * created page whose title matches (case/space-insensitive). Without this, linking
+ * to a page before it exists leaves it permanently orphaned.
+ */
+async function resolveWantedLinks(
+  db: Kysely<Database>,
+  pageId: string,
+  title: string,
+): Promise<void> {
+  const norm = normalizeTitle(title)
+  const wanted = await db
+    .selectFrom('links')
+    .select(['id', 'from_id', 'to_title', 'type'])
+    .where('to_id', 'is', null)
+    .where('to_title', 'is not', null)
+    .execute()
+  for (const w of wanted) {
+    if (!w.to_title || normalizeTitle(w.to_title) !== norm) continue
+    if (w.from_id === pageId) {
+      await db.deleteFrom('links').where('id', '=', w.id).execute() // would be a self-link
+      continue
+    }
+    const dup = await db
+      .selectFrom('links')
+      .select('id')
+      .where('from_id', '=', w.from_id)
+      .where('to_id', '=', pageId)
+      .where('type', '=', w.type)
+      .executeTakeFirst()
+    if (dup) await db.deleteFrom('links').where('id', '=', w.id).execute()
+    else
+      await db
+        .updateTable('links')
+        .set({ to_id: pageId, to_title: null })
+        .where('id', '=', w.id)
+        .execute()
+  }
 }
 
 /** A unique-among-pages slug derived from `base`. */
@@ -46,7 +89,9 @@ async function uniqueSlug(db: Kysely<Database>, base: string): Promise<string> {
 }
 
 export async function createPage(db: Kysely<Database>, input: CreatePageInput): Promise<Context> {
-  const slug = await uniqueSlug(db, input.slug ?? slugify(input.title))
+  // Always run the candidate through slugify so an imported/crafted slug can't
+  // contain path separators (export writes <slug>.md).
+  const slug = await uniqueSlug(db, slugify(input.slug ?? input.title))
   const page = await createContext(db, {
     title: input.title,
     body: input.body ?? '',
@@ -57,17 +102,28 @@ export async function createPage(db: Kysely<Database>, input: CreatePageInput): 
     tags: input.tags,
     pageType: input.pageType,
     slug,
+    createdAt: input.createdAt,
+    updatedAt: input.updatedAt,
+    metadata: input.metadata,
   })
   await syncBodyLinks(db, page.id, page.body)
+  await resolveWantedLinks(db, page.id, input.title)
   return (await getPage(db, page.id)) ?? page
 }
 
 export async function recordSource(
   db: Kysely<Database>,
-  input: { title: string; body: string; uri?: string; agentSource?: string | null },
+  input: {
+    title: string
+    body: string
+    uri?: string
+    agentSource?: string | null
+    createdAt?: string
+    updatedAt?: string
+  },
 ): Promise<Context> {
   const slug = await uniqueSlug(db, slugify(input.title))
-  return createContext(db, {
+  const page = await createContext(db, {
     title: input.title,
     body: input.body,
     kind: 'note',
@@ -77,7 +133,11 @@ export async function recordSource(
     pageType: 'source',
     slug,
     metadata: input.uri ? { uri: input.uri } : {},
+    createdAt: input.createdAt,
+    updatedAt: input.updatedAt,
   })
+  await resolveWantedLinks(db, page.id, input.title)
+  return page
 }
 
 export async function getPage(db: Kysely<Database>, id: string): Promise<Context | null> {
@@ -186,6 +246,7 @@ export async function addLink(
 ): Promise<void> {
   let toId = input.toId ?? null
   let toTitle = input.toTitle ?? null
+  if (!toId && !toTitle) return // nothing to link to
 
   if (!toId && toTitle) {
     const matches = await pageMatchesByTitle(db, toTitle)
@@ -196,14 +257,27 @@ export async function addLink(
   }
   if (toId && toId === fromId) return // no self-links
 
-  const dup = await db
-    .selectFrom('links')
-    .select('id')
-    .where('from_id', '=', fromId)
-    .where('type', '=', input.type)
-    .where(toId ? 'to_id' : 'to_title', '=', toId ?? toTitle)
-    .executeTakeFirst()
-  if (dup) return
+  // Dedup. Wanted links compare on the normalized title (resolution is case-insensitive).
+  if (toId) {
+    const dup = await db
+      .selectFrom('links')
+      .select('id')
+      .where('from_id', '=', fromId)
+      .where('type', '=', input.type)
+      .where('to_id', '=', toId)
+      .executeTakeFirst()
+    if (dup) return
+  } else {
+    const norm = normalizeTitle(toTitle ?? '')
+    const existing = await db
+      .selectFrom('links')
+      .select('to_title')
+      .where('from_id', '=', fromId)
+      .where('type', '=', input.type)
+      .where('to_id', 'is', null)
+      .execute()
+    if (existing.some((w) => w.to_title && normalizeTitle(w.to_title) === norm)) return
+  }
 
   await db
     .insertInto('links')
@@ -276,9 +350,13 @@ export async function backlinks(db: Kysely<Database>, id: string): Promise<LinkV
 
 /** Re-derive the reserved `references` channel from [[..]] in a body, leaving explicit edges intact. */
 export async function syncBodyLinks(db: Kysely<Database>, id: string, body: string): Promise<void> {
-  await db.deleteFrom('links').where('from_id', '=', id).where('type', '=', 'references').execute()
+  await db
+    .deleteFrom('links')
+    .where('from_id', '=', id)
+    .where('type', '=', REFERENCES_LINK)
+    .execute()
   for (const title of parseWikiLinks(body)) {
-    await addLink(db, id, { toTitle: title, type: 'references' })
+    await addLink(db, id, { toTitle: title, type: REFERENCES_LINK })
   }
 }
 
@@ -398,12 +476,14 @@ export async function lint(db: Kysely<Database>): Promise<LintReport> {
     }
   }
 
-  // dangling: resolved link to a missing or soft-deleted page
+  // dangling: resolved link (from a live page) to a missing or soft-deleted page
   const danglingRows = await db
     .selectFrom('links as l')
+    .innerJoin('contexts as f', 'f.id', 'l.from_id')
     .leftJoin('contexts as c', 'c.id', 'l.to_id')
     .select(['l.from_id as fromId', 'l.to_id as toId', 'c.id as cid', 'c.deleted_at as cdel'])
     .where('l.to_id', 'is not', null)
+    .where('f.deleted_at', 'is', null)
     .execute()
   for (const r of danglingRows) {
     if (!r.cid || r.cdel) {
@@ -415,12 +495,14 @@ export async function lint(db: Kysely<Database>): Promise<LintReport> {
     }
   }
 
-  // wanted: unresolved [[Title]]
+  // wanted: unresolved [[Title]] from a live page
   const wantedRows = await db
-    .selectFrom('links')
-    .select(['from_id', 'to_title'])
-    .where('to_id', 'is', null)
-    .where('to_title', 'is not', null)
+    .selectFrom('links as l')
+    .innerJoin('contexts as f', 'f.id', 'l.from_id')
+    .select(['l.from_id as from_id', 'l.to_title as to_title'])
+    .where('l.to_id', 'is', null)
+    .where('l.to_title', 'is not', null)
+    .where('f.deleted_at', 'is', null)
     .execute()
   for (const r of wantedRows) {
     findings.push({

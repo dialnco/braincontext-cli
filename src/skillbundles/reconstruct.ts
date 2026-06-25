@@ -1,16 +1,24 @@
 import { chmodSync, mkdirSync, writeFileSync } from 'node:fs'
-import { dirname, join } from 'node:path'
+import { dirname, isAbsolute, join, relative, sep } from 'node:path'
 import type { LoadedSkill } from '../core/skills'
 import { stringifyFrontmatter } from '../lib/frontmatter'
 
+/** Join, refusing any component that escapes `base` (path-traversal guard). */
+function safeJoin(base: string, rel: string): string {
+  const target = join(base, rel)
+  const r = relative(base, target)
+  if (r === '..' || r.startsWith(`..${sep}`) || isAbsolute(r)) {
+    throw new Error(`unsafe path in skill bundle: ${rel}`)
+  }
+  return target
+}
+
 /**
  * Write a loaded skill bundle to `<outDir>/<name>/`: SKILL.md (frontmatter+body)
- * plus every sidecar at its relative path. Files flagged executable — and
- * anything under scripts/ — are chmod 0o755; everything else 0o644.
+ * plus every sidecar at its relative path, restoring the stored executable bit.
  */
 export function reconstructSkill(loaded: LoadedSkill, outDir: string): string {
-  const name = loaded.context.title ?? 'skill'
-  const root = join(outDir, name)
+  const root = safeJoin(outDir, loaded.context.title ?? 'skill')
   mkdirSync(root, { recursive: true })
 
   writeFileSync(
@@ -20,11 +28,10 @@ export function reconstructSkill(loaded: LoadedSkill, outDir: string): string {
   )
 
   for (const f of loaded.files) {
-    const target = join(root, f.relPath)
+    const target = safeJoin(root, f.relPath)
     mkdirSync(dirname(target), { recursive: true })
     writeFileSync(target, f.content)
-    const exec = f.isExecutable || f.relPath.startsWith('scripts/')
-    chmodSync(target, exec ? 0o755 : 0o644)
+    chmodSync(target, f.isExecutable ? 0o755 : 0o644)
   }
 
   return root

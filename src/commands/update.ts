@@ -3,7 +3,7 @@ import { type UpdateInput, updateContext } from '../core/contexts'
 import { withDb } from '../core/db'
 import { formatContext } from '../lib/format'
 import { resolveBody } from '../lib/stdin'
-import { collect, dbOptsFrom } from './_shared'
+import { collect, dbOptsFrom, requireContext } from './_shared'
 
 export function updateCommand(): Command {
   return new Command('update')
@@ -34,7 +34,10 @@ export function updateCommand(): Command {
       }
       if (opts.agent) patch.agentSource = opts.agent
 
-      const ctx = await withDb(dbOptsFrom(command), (db) => updateContext(db, id, patch))
+      const ctx = await withDb(dbOptsFrom(command), async (db) => {
+        if (!(await requireContext(db, id))) return null
+        return updateContext(db, id, patch)
+      })
       if (!ctx) {
         console.error(`No context found with id ${id}`)
         process.exitCode = 1

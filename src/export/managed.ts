@@ -14,7 +14,8 @@ export function applyManagedBlock(existing: string, body: string): string {
   const block = `${BEGIN}\n${body}\n${END}`
   if (existing.includes(BEGIN) && existing.includes(END)) {
     const re = new RegExp(`${escapeRe(BEGIN)}[\\s\\S]*?${escapeRe(END)}`)
-    return existing.replace(re, block)
+    // Function replacer so `$&`, `$1`, `$$` in the body aren't treated as specials.
+    return existing.replace(re, () => block)
   }
   const trimmed = existing.replace(/\n*$/, '')
   const prefix = trimmed.length > 0 ? `${trimmed}\n\n` : ''

@@ -7,7 +7,7 @@ import { createPage, getPageByTitle } from '../src/core/wiki'
 import { selectContexts } from '../src/export/select'
 import { runExport } from '../src/export/write'
 import { parseFrontmatter, stringifyFrontmatter } from '../src/lib/frontmatter'
-import { applyImport } from '../src/sync/import'
+import { applyImport, writeExportManifest } from '../src/sync/import'
 import { freshDb } from './_db'
 
 function tmp(): string {
@@ -101,6 +101,7 @@ describe('store round-trip (manual markdown <-> db sync)', () => {
 
     const dir = tmp()
     runExport(await selectContexts(db, { namespace: 'proj' }), { outDir: dir, targets: ['store'] })
+    writeExportManifest(dir, { namespace: 'proj' }) // what `export --targets store` records
     const bFile = fileFor(dir, b.id)
     if (!bFile) throw new Error('B file not found')
     unlinkSync(join(dir, bFile))

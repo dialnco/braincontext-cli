@@ -1,4 +1,4 @@
-import { readdirSync, readFileSync, statSync } from 'node:fs'
+import { lstatSync, readdirSync, readFileSync } from 'node:fs'
 import { basename, join, relative, sep } from 'node:path'
 import { parseFrontmatter } from '../lib/frontmatter'
 
@@ -19,8 +19,11 @@ export interface ParsedSkill {
 
 function walk(root: string, dir: string, out: SkillFile[]): void {
   for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    // Never follow symlinks — a symlinked file would exfiltrate its target's
+    // bytes (outside the bundle) into the store.
+    if (entry.isSymbolicLink()) continue
     const abs = join(dir, entry.name)
-    const st = statSync(abs) // follows symlinks
+    const st = lstatSync(abs)
     if (st.isDirectory()) {
       walk(root, abs, out)
       continue

@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { Command } from 'commander'
+import { ZodError } from 'zod'
 import { addCommand } from './commands/add'
 import { exportCommand } from './commands/export'
 import { getCommand } from './commands/get'
@@ -69,6 +70,10 @@ Store precedence: --db > --global/--local > ./.braincontext (if present) > ~/.br
 try {
   await program.parseAsync(process.argv)
 } catch (err) {
-  console.error(err instanceof Error ? err.message : String(err))
+  if (err instanceof ZodError) {
+    console.error(err.issues.map((i) => i.message).join('; '))
+  } else {
+    console.error(err instanceof Error ? err.message : String(err))
+  }
   process.exitCode = 1
 }

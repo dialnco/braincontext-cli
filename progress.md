@@ -62,6 +62,16 @@ A **manual** files→DB sync (never auto-sync) for non-wiki contexts.
 - [ ] Optional vector/semantic retrieval (`sqlite-vec`) — out of scope per the wiki direction; could augment `wiki search` later.
 - [ ] `store` round-trip currently syncs title/body/tags (+merge metadata); `kind`/`namespace`/`scope` are treated as immutable identity. Could extend to sync structural fields if needed.
 
+## Hardening — multi-agent audit pass (shipped)
+
+A 9-agent audit (6 dimension auditors → adversarial skeptic + completeness critic → synthesis) found and we fixed:
+
+- **Security:** skill-bundle symlinks no longer followed (no file exfiltration); crafted wiki `slug` is slugified (no path traversal on export); skill reconstruct has a path-traversal guard; `.mdc` `globs` collapsed to one line + hardened `yamlScalar` (no YAML-frontmatter injection).
+- **Data-loss / correctness:** `import --prune` now scoped by an export **manifest** (`.braincontext-export.json`) and refused when scope is unknown (no accidental namespace wipe); wiki `export` deletes stale files (deleted pages can't resurrect); managed-block replace uses a function replacer (`$`-patterns no longer corrupt bodies); creating a page now **resolves pre-existing wanted links** (no permanent phantom orphans).
+- **Firewall:** by-id context surfaces (`bctx get/update/rm`, MCP `get/update/delete_context`, the context resource) reject wiki pages → added `bctx wiki rm`; source pages stay immutable everywhere.
+- **Robustness:** `searchContexts` tolerates FTS5-special input (sanitized fallback, never crashes) and honors `includeDeleted`; `references` reserved for the auto channel (explicit links survive body re-sync); CRLF/BOM frontmatter parsed; bad files skipped (not fatal) on import; `.cursor/rules` filenames de-duped; CLI int options validated; zod errors print cleanly; lint excludes edges from soft-deleted pages; provenance timestamps + source `uri` preserved on wiki re-import; skill exec-bit honored faithfully.
+- Coverage: `test/audit.test.ts` (11 regression tests) added; **47 tests** total, all gates green.
+
 ## Notes / decisions
 
 - **Driver:** better-sqlite3 over `node:sqlite` because the latter is still experimental on Node 22–24 and lacks migration-tool support; revisit on Node 26.

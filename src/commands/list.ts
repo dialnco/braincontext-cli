@@ -4,7 +4,7 @@ import { type ListFilters, listContexts } from '../core/contexts'
 import { withDb } from '../core/db'
 import { KINDS, SCOPES } from '../core/types'
 import { formatList } from '../lib/format'
-import { dbOptsFrom } from './_shared'
+import { dbOptsFrom, parsePositiveInt } from './_shared'
 
 export function listCommand(): Command {
   return new Command('list')
@@ -25,7 +25,7 @@ export function listCommand(): Command {
         scope: opts.scope ? z.enum(SCOPES).parse(opts.scope) : undefined,
         tag: opts.tag,
         agentSource: opts.agent,
-        limit: opts.limit ? Number(opts.limit) : undefined,
+        limit: parsePositiveInt(opts.limit, '--limit'),
         includeDeleted: Boolean(opts.all),
         pageScope: opts.includeWiki ? 'all' : undefined,
       }

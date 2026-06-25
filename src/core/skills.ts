@@ -45,6 +45,7 @@ export async function importSkill(db: Kysely<Database>, input: ImportSkillInput)
       .select('id')
       .where('kind', '=', 'skill')
       .where('title', '=', input.name)
+      .where('namespace', '=', input.namespace ?? 'global')
       .where('deleted_at', 'is', null)
       .execute()
     for (const row of existing) {
