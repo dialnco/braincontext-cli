@@ -1,7 +1,6 @@
 import type { Kysely } from 'kysely'
 import { Migrator } from 'kysely/migration'
 import { migration as init0001 } from '../migrations/0001_init'
-import { migration as skillFiles0002 } from '../migrations/0002_skill_files'
 import type { Database } from './types'
 
 /**
@@ -15,7 +14,6 @@ export async function migrateToLatest(db: Kysely<Database>): Promise<void> {
       async getMigrations() {
         return {
           '0001_init': init0001,
-          '0002_skill_files': skillFiles0002,
         }
       },
     },

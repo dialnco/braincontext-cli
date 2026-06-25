@@ -11,6 +11,38 @@ export type Scope = (typeof SCOPES)[number]
 /** Append-only audit events. */
 export type HistoryEvent = 'create' | 'update' | 'delete'
 
+/** Wiki page types. A context with a non-null page_type is a wiki page. */
+export const PAGE_TYPES = [
+  'entity',
+  'concept',
+  'summary',
+  'comparison',
+  'analysis',
+  'source',
+  'index',
+] as const
+export type PageType = (typeof PAGE_TYPES)[number]
+
+/** Page types an agent may create directly (excludes the derived `index`). */
+export const AUTHORED_PAGE_TYPES = [
+  'entity',
+  'concept',
+  'summary',
+  'comparison',
+  'analysis',
+] as const
+
+/** Typed link relations. `references` is the channel auto-derived from [[..]]. */
+export const LINK_TYPES = [
+  'references',
+  'relates',
+  'supersedes',
+  'part-of',
+  'mentions',
+  'source',
+] as const
+export type LinkType = (typeof LINK_TYPES)[number]
+
 export interface ContextsTable {
   id: string
   namespace: string
@@ -21,6 +53,10 @@ export interface ContextsTable {
   agent_source: string | null
   /** JSON-encoded free-form metadata. */
   metadata: string
+  /** Non-null marks this row as a wiki page of that type; null = normal context. */
+  page_type: string | null
+  /** Stable, unique-among-pages filename slug for export round-trips. */
+  slug: string | null
   created_at: string
   updated_at: string
   deleted_at: string | null
@@ -64,6 +100,27 @@ export interface ContextsFtsTable {
   body: string
 }
 
+/** Typed edges between wiki pages. to_id NULL + to_title => a wanted/red link. */
+export interface LinksTable {
+  id: Generated<number>
+  from_id: string
+  to_id: string | null
+  to_title: string | null
+  type: string
+  created_at: string
+}
+
+/** Append-only log of wiki operations (ingest/query/maintenance). */
+export interface WikiLogTable {
+  id: Generated<number>
+  op: string
+  ref_id: string | null
+  title: string | null
+  detail: string | null
+  agent_source: string | null
+  created_at: string
+}
+
 export interface Database {
   contexts: ContextsTable
   tags: TagsTable
@@ -71,4 +128,6 @@ export interface Database {
   context_history: ContextHistoryTable
   skill_files: SkillFilesTable
   contexts_fts: ContextsFtsTable
+  links: LinksTable
+  wiki_log: WikiLogTable
 }

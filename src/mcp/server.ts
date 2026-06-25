@@ -11,6 +11,7 @@ import {
 } from '../core/contexts'
 import { type Database, KINDS, SCOPES } from '../core/types'
 import { getVersion } from '../lib/pkg'
+import { registerWikiTools } from './wiki-tools'
 
 function ok(value: unknown) {
   return { content: [{ type: 'text' as const, text: JSON.stringify(value, null, 2) }] }
@@ -162,6 +163,8 @@ export function buildServer(db: Kysely<Database>): McpServer {
       }
     },
   )
+
+  registerWikiTools(server, db)
 
   return server
 }

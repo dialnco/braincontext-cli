@@ -14,6 +14,10 @@ export interface Context {
   scope: Scope
   agentSource: string | null
   metadata: Record<string, unknown>
+  /** Non-null = this is a wiki page of that type; null = normal context. */
+  pageType: string | null
+  /** Stable filename slug for wiki pages (null for normal contexts). */
+  slug: string | null
   tags: string[]
   createdAt: string
   updatedAt: string
@@ -29,6 +33,8 @@ export interface CreateInput {
   agentSource?: string | null
   tags?: string[]
   metadata?: Record<string, unknown>
+  pageType?: string | null
+  slug?: string | null
 }
 
 export interface ListFilters {
@@ -39,6 +45,11 @@ export interface ListFilters {
   tag?: string
   limit?: number
   includeDeleted?: boolean
+  /**
+   * Which rows to include by page-ness. Default 'context' excludes wiki pages,
+   * so legacy surfaces (list/search/export/MCP) never see them.
+   */
+  pageScope?: 'context' | 'wiki' | 'all'
 }
 
 export interface UpdateInput {
@@ -73,6 +84,8 @@ function toContext(row: ContextRow, tags: string[]): Context {
     scope: row.scope,
     agentSource: row.agent_source,
     metadata: parseMetadata(row.metadata),
+    pageType: row.page_type,
+    slug: row.slug,
     tags,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
@@ -128,6 +141,8 @@ export async function createContext(db: Kysely<Database>, input: CreateInput): P
         scope: input.scope ?? 'project',
         agent_source: agentSource,
         metadata: JSON.stringify(input.metadata ?? {}),
+        page_type: input.pageType ?? null,
+        slug: input.slug ?? null,
         created_at: ts,
         updated_at: ts,
         deleted_at: null,
@@ -174,6 +189,9 @@ export async function listContexts(
 ): Promise<Context[]> {
   let q = db.selectFrom('contexts').selectAll()
   if (!filters.includeDeleted) q = q.where('deleted_at', 'is', null)
+  const pageScope = filters.pageScope ?? 'context'
+  if (pageScope === 'context') q = q.where('page_type', 'is', null)
+  else if (pageScope === 'wiki') q = q.where('page_type', 'is not', null)
   if (filters.namespace) q = q.where('namespace', '=', filters.namespace)
   if (filters.kind) q = q.where('kind', '=', filters.kind)
   if (filters.scope) q = q.where('scope', '=', filters.scope)
@@ -313,6 +331,9 @@ export async function searchContexts(
   filters: ListFilters = {},
 ): Promise<Context[]> {
   const conditions = [sql`contexts_fts MATCH ${query}`, sql`c.deleted_at IS NULL`]
+  const pageScope = filters.pageScope ?? 'context'
+  if (pageScope === 'context') conditions.push(sql`c.page_type IS NULL`)
+  else if (pageScope === 'wiki') conditions.push(sql`c.page_type IS NOT NULL`)
   if (filters.namespace) conditions.push(sql`c.namespace = ${filters.namespace}`)
   if (filters.kind) conditions.push(sql`c.kind = ${filters.kind}`)
   if (filters.scope) conditions.push(sql`c.scope = ${filters.scope}`)

@@ -16,6 +16,7 @@ export function listCommand(): Command {
     .option('--agent <name>', 'filter by agent source')
     .option('--limit <n>', 'max rows (default 50)')
     .option('--all', 'include soft-deleted entries')
+    .option('--include-wiki', 'also include wiki pages (excluded by default)')
     .option('--json', 'output JSON')
     .action(async (opts, command: Command) => {
       const filters: ListFilters = {
@@ -26,6 +27,7 @@ export function listCommand(): Command {
         agentSource: opts.agent,
         limit: opts.limit ? Number(opts.limit) : undefined,
         includeDeleted: Boolean(opts.all),
+        pageScope: opts.includeWiki ? 'all' : undefined,
       }
       const items = await withDb(dbOptsFrom(command), (db) => listContexts(db, filters))
       console.log(opts.json ? JSON.stringify(items, null, 2) : formatList(items))

@@ -110,6 +110,29 @@ bctx skill export my-skill ./out     # writes ./out/my-skill/ back to disk
 > `bctx skill` (singular) manages skills **stored in the database**; `bctx skills`
 > (plural) serves the CLI's **own bundled docs**.
 
+## Wiki (linked knowledge base)
+
+A Karpathy-style **LLM wiki** over the same store: interlinked markdown **pages**
+with typed **links** (the graph *is* the knowledge graph), searched with FTS5/BM25
+and link navigation — **no embeddings**. Wiki pages are hidden from plain
+`list`/`search` (use `--include-wiki` to include them).
+
+```bash
+bctx wiki ingest ./article.md --title "TLS notes"   # store a raw source + a synthesis checklist
+bctx wiki new "Gateway" --type entity --file -        # create a page (entity|concept|summary|comparison|analysis)
+echo "See [[Gateway]]." | bctx wiki new "OAuth2" --type concept --file -   # [[Title]] auto-links
+bctx wiki link "OAuth2" "Gateway" --type relates      # explicit typed link
+bctx wiki show "OAuth2"                                # page + outbound links + backlinks
+bctx wiki search "tls"                                 # FTS5/BM25 over pages
+bctx wiki lint                                         # orphans, dangling/wanted links, ...
+bctx wiki index --out wiki/index.md                   # catalog by page type
+bctx wiki export ./wiki  &&  bctx wiki import ./wiki   # Obsidian-compatible round-trip
+```
+
+Ingestion is **agent-driven**: the CLI stores/links/searches/lints; an agent (via the
+MCP `wiki_*` tools + the bundled `braincontext-wiki` skill) does the synthesis. See
+`bctx skills get braincontext-wiki --full`.
+
 ## Development
 
 ```bash
@@ -128,13 +151,16 @@ src/
   commands/         thin handlers: parse -> validate -> call core/
   core/             shared data-access layer (single source of truth)
   migrations/       Kysely migrations (registered in code)
-  mcp/              MCP server (tools + resource) over core/
+  core/wiki.ts      wiki pages + typed links + lint (over core/contexts)
+  mcp/              MCP server (context + wiki tools + resources) over core/
   export/           AGENTS.md / CLAUDE.md / .cursor/rules renderers + managed fences
   skillbundles/     SKILL.md parse / validate / reconstruct (filesystem)
+  wiki/             wiki export / import (markdown <-> store)
   skills/           bundled-skill doc loader
-  lib/              small helpers (paths, stdin, formatting, frontmatter)
-skills/braincontext/  shipped agent docs (SKILL.md + references)
+  lib/              small helpers (paths, stdin, formatting, frontmatter, wikilinks)
+skills/braincontext/       shipped CLI agent docs
+skills/braincontext-wiki/  shipped wiki-maintainer skill
 ```
 
-Every surface — CLI commands, the MCP server, export, and skill bundles — goes
-through `core/`, never raw SQL, so they can't drift. See `progress.md`.
+Every surface — CLI commands, the MCP server, export, skill bundles, and the wiki —
+goes through `core/`, never raw SQL, so they can't drift. See `progress.md`.

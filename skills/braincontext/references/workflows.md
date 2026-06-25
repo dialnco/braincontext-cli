@@ -1,5 +1,9 @@
 # Common workflows
 
+These are **individual-entry** flows (single save/retrieve/update). For ingesting
+sources and building durable, interlinked knowledge, use the wiki instead —
+`bctx skills get braincontext-wiki` (the preferred workflow).
+
 ## Save a rule from stdin
 
 ```bash

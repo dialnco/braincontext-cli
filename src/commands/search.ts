@@ -16,6 +16,7 @@ export function searchCommand(): Command {
     .option('--tag <tag>', 'filter by tag')
     .option('--agent <name>', 'filter by agent source')
     .option('--limit <n>', 'max rows (default 50)')
+    .option('--include-wiki', 'also include wiki pages (excluded by default)')
     .option('--json', 'output JSON')
     .action(async (query: string, opts, command: Command) => {
       const filters: ListFilters = {
@@ -25,6 +26,7 @@ export function searchCommand(): Command {
         tag: opts.tag,
         agentSource: opts.agent,
         limit: opts.limit ? Number(opts.limit) : undefined,
+        pageScope: opts.includeWiki ? 'all' : undefined,
       }
       const items = await withDb(dbOptsFrom(command), (db) => searchContexts(db, query, filters))
       console.log(opts.json ? JSON.stringify(items, null, 2) : formatList(items))

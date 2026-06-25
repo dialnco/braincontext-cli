@@ -1,14 +1,22 @@
 ---
 name: braincontext
-description: Save and retrieve shared context/memory across AI coding agents using the local `bctx` CLI (a local-first SQLite store). Use when you need to persist a decision, rule, snippet, or note for later, or recall previously stored project context.
+description: Save and retrieve INDIVIDUAL context entries (decisions, rules, snippets, notes) with the local `bctx` CLI (a local-first SQLite store) — for quick, specific save/recall operations. For durable, interlinked knowledge built from sources, prefer the braincontext-wiki skill (`bctx wiki`).
 allowed-tools: Bash(bctx:*)
 ---
 
 # braincontext — shared context for agents
 
 `bctx` is a local-first CLI backed by a single SQLite file. It lets any agent
-(Claude, Codex, Cursor, ...) **save** durable context and **retrieve** it later.
+(Claude, Codex, Cursor, ...) **save** context and **retrieve** it later.
 Store precedence: `--db` > `--global`/`--local` > `./.braincontext` (if present) > `~/.braincontext`.
+
+## Two ways to use braincontext
+
+- **Wiki (preferred)** — for durable, **interlinked** knowledge built from sources:
+  interlinked pages + typed links, ingest/query/lint. Start here for anything you'll
+  revisit or connect. → `bctx skills get braincontext-wiki`
+- **Direct context ops (this doc)** — for **individual** entries: quick save/recall of
+  one decision, rule, snippet, or note when you don't need the wiki structure.
 
 ## Quick start
 
@@ -30,7 +38,10 @@ bctx get <id> --json                       # fetch one entry
 Always pass `--agent <you>` (e.g. `--agent claude`) so authorship is tracked, and
 `--namespace <project>` to keep projects separate (default `global`).
 
-## Commands
+## Direct context operations (individual entries)
+
+For linked, compounding knowledge use `bctx wiki` instead (see above). These commands
+are for single entries:
 
 ```bash
 bctx add [body...] [--title t] [--kind k] [--namespace ns] [--scope s] \
@@ -56,3 +67,4 @@ bctx skills get braincontext --full        # this doc + all references
 - `references/schema.md` — the SQLite schema, kinds, and scopes
 - `references/workflows.md` — common save/retrieve/update flows
 - `references/search.md` — FTS5 query syntax and tips
+- **`bctx skills get braincontext-wiki`** — the preferred wiki workflow (linked knowledge)

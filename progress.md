@@ -23,7 +23,7 @@ Stack: ESM + TypeScript · commander · better-sqlite3 + Kysely · FTS5 · ULID 
 
 ## v1.5 — multi-agent surfaces (shipped)
 
-Stack additions: `@modelcontextprotocol/sdk@1.29.0` · `yaml@2.9.0`. Migration `0002_skill_files`. zod stays at 4.x.
+Stack additions: `@modelcontextprotocol/sdk@1.29.0` · `yaml@2.9.0`. (skill_files BLOB schema, later folded into `0001_init` — see v2.) zod stays at 4.x.
 
 - [x] **MCP server** (`bctx mcp`) — stdio server with full-CRUD tools (`search/get/list/create/update_context` + soft-only `delete_context`) + a `bctx://context/{id}` resource. stdout is protocol-only; logs to stderr; long-lived DB.
 - [x] **Markdown export** (`bctx export`) — AGENTS.md (sections by kind, canonical), CLAUDE.md (`@AGENTS.md` bridge), `.cursor/rules/*.mdc` (one per rule, 3-field frontmatter). Idempotent `<!-- BEGIN/END braincontext-cli -->` fences; `--out/--targets/--dry-run/--check`.
@@ -32,11 +32,24 @@ Stack additions: `@modelcontextprotocol/sdk@1.29.0` · `yaml@2.9.0`. Migration `
 - [x] Vitest coverage for all three (mcp / export / skillbundle / frontmatter); 18 tests passing.
 - [x] Verified end-to-end on the `dist/` bundle: export dry-run/write/check, skill add→list→export round-trip (exec bit restored), and a real `bctx mcp` stdio handshake (clean stdout, 6 tools, resource).
 
-### Still deferred (v2)
+## v2 — Wiki subsystem (shipped)
 
-- [ ] **Semantic search**: `sqlite-vec` embeddings + hybrid FTS5 + vector retrieval (RRF reranking). Store embedding model name + dimension for portability.
-- [ ] **Knowledge-graph relations** (entities/relations/observations) for connected context, à la the MCP memory server.
-- [ ] **Bidirectional markdown round-trip** so edits agents make in exported files flow back into the DB.
+Replaces the previously-deferred "semantic search (vectors)" and "knowledge-graph relations" with a Karpathy-style **LLM wiki**: interlinked markdown **pages** + typed **links** (the graph), retrieved via FTS5/BM25 + link navigation — **no embeddings**. Greenfield: the whole schema is one base `0001_init` (0002 folded in). Stack: `yaml` reused for frontmatter.
+
+- [x] **Schema** folded into `0001_init`: `contexts.page_type` + `contexts.slug` (unique among pages), `links` (typed edges; `to_id NULL`+`to_title` = wanted link), `wiki_log`. FTS untouched.
+- [x] **Default-exclude boundary**: `listContexts`/`searchContexts` default to `pageScope:'context'` (`page_type IS NULL`) — wiki pages never leak into `list`/`search`/AGENTS.md export/MCP. `--include-wiki` opts in. Regression-guarded by tests.
+- [x] **`core/wiki.ts`**: createPage/recordSource/getPage(BySlug/ByTitle)/updatePage(source-immutable)/listPages/searchPages, addLink/removeLink/outbound/backlinks, `[[Title]]` auto-sync (`references` channel), appendLog/listLog, and `lint`.
+- [x] **`bctx wiki`**: new/get/show/link/unlink/backlinks/search/index/log/ingest/lint/export/import. Ingest is mechanical (store source + log + checklist); the agent synthesizes.
+- [x] **MCP**: `wiki_search/get/new/link/ingest/lint` (6 tools) + `bctx://wiki/{id}` resource.
+- [x] **Schema-layer skill** `skills/braincontext-wiki/` (SKILL.md + references/{structure,ingest,query,lint}) — the "disciplined maintainer" doc.
+- [x] **Export/import** Obsidian-compatible markdown (`[[Title]]`↔`[..](slug.md)`, index.md + log.md), idempotent round-trip.
+- [x] Vitest: wiki / lint / export-import / regression-guard / mcp-wiki (31 tests passing).
+- [x] Verified end-to-end on the `dist/` bundle: ingest→pages→links→lint, list regression guard, index/log, export→import, and a real `bctx mcp` wiki-tool handshake.
+
+### Still deferred (v3)
+
+- [ ] **Bidirectional markdown round-trip** for the *non-wiki* context export (edits in CLAUDE.md/AGENTS.md flowing back to the DB). The wiki already round-trips via `wiki export/import`.
+- [ ] Optional vector/semantic retrieval (`sqlite-vec`) — explicitly out of scope per the wiki direction; could augment `wiki search` later.
 
 ## Notes / decisions
 
@@ -46,4 +59,6 @@ Stack additions: `@modelcontextprotocol/sdk@1.29.0` · `yaml@2.9.0`. Migration `
 - **Anti-drift rule:** every surface calls `core/`, never raw SQL. (MCP, export, and skill bundles all go through `core/`.)
 - **MCP SDK:** `@modelcontextprotocol/sdk@1.29.0` (stable) supports zod 3 **and** zod 4 via its compat layer — kept zod 4, no pin. Avoided the `@modelcontextprotocol/server` 2.x alpha. Raw-shape `inputSchema` (not `z.object`). stdout reserved for protocol; all logs to stderr.
 - **Export bridge:** AGENTS.md is canonical; CLAUDE.md only imports it (`@AGENTS.md`) since Claude Code doesn't read AGENTS.md — single source of truth, no drift. Cursor `globs` emitted as an unquoted CSV string (not a YAML list), per spec.
-- **Skill storage (0002):** `skill_files.content` is BLOB + `is_executable` so binary `assets/` round-trip and `scripts/` stay executable. Table was empty everywhere → safe migration. Full frontmatter is stored losslessly in the context's `metadata` JSON.
+- **Skill storage:** `skill_files.content` is BLOB + `is_executable` so binary `assets/` round-trip and `scripts/` stay executable. Full frontmatter stored losslessly in the context's `metadata` JSON.
+- **Greenfield migrations:** no incremental/back-compat migrations — the full schema lives in one base `0001_init`; schema changes re-baseline (reset the DB). This collapsed the planned `0003_wiki` ADD-COLUMN/rollback work.
+- **Wiki = no embeddings:** retrieval is FTS5/BM25 + the typed `links` graph (the graph *is* the knowledge graph). Pages reuse `contexts` (FTS/history/MCP/export for free); `page_type` is the wiki marker, orthogonal to `kind`, default-excluded so legacy surfaces never regress. Sources (`page_type='source'`) are immutable. `[[Title]]` resolves case-insensitively to non-deleted pages; unresolved → wanted (lint) link. Lint joins `deleted_at IS NULL` on both endpoints and ignores edges from `index` pages.

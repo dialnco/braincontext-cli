@@ -22,15 +22,17 @@ describe('mcp server', () => {
   it('registers the full CRUD tool surface', async () => {
     const db = await freshDb()
     const client = await connect(db)
-    const names = (await client.listTools()).tools.map((t) => t.name).sort()
-    expect(names).toEqual([
+    const names = (await client.listTools()).tools.map((t) => t.name)
+    for (const n of [
       'create_context',
       'delete_context',
       'get_context',
       'list_contexts',
       'search_contexts',
       'update_context',
-    ])
+    ]) {
+      expect(names).toContain(n)
+    }
     await db.destroy()
   })
 
