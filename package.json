@@ -1,0 +1,57 @@
+{
+  "name": "braincontext-cli",
+  "version": "0.1.0",
+  "description": "Local-first SQLite CLI for saving and retrieving shared context across AI coding agents (Claude, Codex, Cursor, ...).",
+  "type": "module",
+  "license": "MIT",
+  "engines": {
+    "node": ">=22"
+  },
+  "bin": {
+    "bctx": "./dist/cli.js"
+  },
+  "files": [
+    "dist",
+    "skills"
+  ],
+  "keywords": [
+    "cli",
+    "sqlite",
+    "ai",
+    "agents",
+    "context",
+    "memory",
+    "local-first"
+  ],
+  "scripts": {
+    "dev": "tsx src/cli.ts",
+    "build": "tsup",
+    "typecheck": "tsc --noEmit",
+    "lint": "biome check .",
+    "format": "biome format --write .",
+    "test": "vitest run",
+    "prepublishOnly": "pnpm run typecheck && pnpm run build && npx publint"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "better-sqlite3"
+    ]
+  },
+  "dependencies": {
+    "better-sqlite3": "^12.11.1",
+    "commander": "^15.0.0",
+    "kysely": "^0.29.2",
+    "ulidx": "^2.4.1",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^2.5.1",
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/node": "^26.0.1",
+    "publint": "^0.3.21",
+    "tsup": "^8.5.1",
+    "tsx": "^4.22.4",
+    "typescript": "^6.0.3",
+    "vitest": "^4.1.9"
+  }
+}

@@ -1,0 +1,11 @@
+node_modules/
+dist/
+coverage/
+*.log
+
+# local stores created during dev/testing
+.braincontext/
+*.db
+*.db-shm
+*.db-wal
+*.sqlite

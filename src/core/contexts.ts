@@ -1,0 +1,346 @@
+import { type Kysely, type Selectable, sql, type Updateable } from 'kysely'
+import { ulid } from 'ulidx'
+import type { ContextsTable, Database, Kind, Scope } from './types'
+
+type ContextRow = Selectable<ContextsTable>
+
+/** A context entry as returned to callers (metadata parsed, tags resolved). */
+export interface Context {
+  id: string
+  namespace: string
+  title: string | null
+  body: string
+  kind: Kind
+  scope: Scope
+  agentSource: string | null
+  metadata: Record<string, unknown>
+  tags: string[]
+  createdAt: string
+  updatedAt: string
+  deletedAt: string | null
+}
+
+export interface CreateInput {
+  body: string
+  title?: string | null
+  kind?: Kind
+  namespace?: string
+  scope?: Scope
+  agentSource?: string | null
+  tags?: string[]
+  metadata?: Record<string, unknown>
+}
+
+export interface ListFilters {
+  namespace?: string
+  kind?: Kind
+  scope?: Scope
+  agentSource?: string
+  tag?: string
+  limit?: number
+  includeDeleted?: boolean
+}
+
+export interface UpdateInput {
+  title?: string | null
+  body?: string
+  addTags?: string[]
+  removeTags?: string[]
+  setMetadata?: Record<string, unknown>
+  agentSource?: string | null
+}
+
+function nowIso(): string {
+  return new Date().toISOString()
+}
+
+function parseMetadata(raw: string): Record<string, unknown> {
+  try {
+    const value = JSON.parse(raw)
+    return value && typeof value === 'object' ? (value as Record<string, unknown>) : {}
+  } catch {
+    return {}
+  }
+}
+
+function toContext(row: ContextRow, tags: string[]): Context {
+  return {
+    id: row.id,
+    namespace: row.namespace,
+    title: row.title,
+    body: row.body,
+    kind: row.kind,
+    scope: row.scope,
+    agentSource: row.agent_source,
+    metadata: parseMetadata(row.metadata),
+    tags,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+    deletedAt: row.deleted_at,
+  }
+}
+
+/** Fetch tag names for a set of context ids in one query. */
+async function tagsByContext(db: Kysely<Database>, ids: string[]): Promise<Map<string, string[]>> {
+  const map = new Map<string, string[]>()
+  if (ids.length === 0) return map
+  const rows = await db
+    .selectFrom('context_tags as ct')
+    .innerJoin('tags as t', 't.id', 'ct.tag_id')
+    .select(['ct.context_id as contextId', 't.name as name'])
+    .where('ct.context_id', 'in', ids)
+    .orderBy('t.name')
+    .execute()
+  for (const r of rows) {
+    const list = map.get(r.contextId) ?? []
+    list.push(r.name)
+    map.set(r.contextId, list)
+  }
+  return map
+}
+
+/** Insert-or-ignore tag names, returning their ids. */
+async function ensureTags(db: Kysely<Database>, names: string[]): Promise<number[]> {
+  const unique = [...new Set(names.map((n) => n.trim()).filter(Boolean))]
+  if (unique.length === 0) return []
+  await db
+    .insertInto('tags')
+    .values(unique.map((name) => ({ name })))
+    .onConflict((oc) => oc.column('name').doNothing())
+    .execute()
+  const rows = await db.selectFrom('tags').select('id').where('name', 'in', unique).execute()
+  return rows.map((r) => r.id)
+}
+
+export async function createContext(db: Kysely<Database>, input: CreateInput): Promise<Context> {
+  const id = ulid()
+  const ts = nowIso()
+  const agentSource = input.agentSource ?? null
+  await db.transaction().execute(async (trx) => {
+    await trx
+      .insertInto('contexts')
+      .values({
+        id,
+        namespace: input.namespace ?? 'global',
+        title: input.title ?? null,
+        body: input.body,
+        kind: input.kind ?? 'note',
+        scope: input.scope ?? 'project',
+        agent_source: agentSource,
+        metadata: JSON.stringify(input.metadata ?? {}),
+        created_at: ts,
+        updated_at: ts,
+        deleted_at: null,
+      })
+      .execute()
+
+    const tagIds = await ensureTags(trx, input.tags ?? [])
+    if (tagIds.length > 0) {
+      await trx
+        .insertInto('context_tags')
+        .values(tagIds.map((tag_id) => ({ context_id: id, tag_id })))
+        .execute()
+    }
+
+    await trx
+      .insertInto('context_history')
+      .values({
+        context_id: id,
+        event: 'create',
+        old_body: null,
+        new_body: input.body,
+        agent_source: agentSource,
+        changed_at: ts,
+      })
+      .execute()
+  })
+
+  const created = await getContext(db, id)
+  if (!created) throw new Error('Failed to create context')
+  return created
+}
+
+/** Fetch a single context by id. Returns soft-deleted rows too (caller decides). */
+export async function getContext(db: Kysely<Database>, id: string): Promise<Context | null> {
+  const row = await db.selectFrom('contexts').selectAll().where('id', '=', id).executeTakeFirst()
+  if (!row) return null
+  const tags = (await tagsByContext(db, [id])).get(id) ?? []
+  return toContext(row, tags)
+}
+
+export async function listContexts(
+  db: Kysely<Database>,
+  filters: ListFilters = {},
+): Promise<Context[]> {
+  let q = db.selectFrom('contexts').selectAll()
+  if (!filters.includeDeleted) q = q.where('deleted_at', 'is', null)
+  if (filters.namespace) q = q.where('namespace', '=', filters.namespace)
+  if (filters.kind) q = q.where('kind', '=', filters.kind)
+  if (filters.scope) q = q.where('scope', '=', filters.scope)
+  if (filters.agentSource) q = q.where('agent_source', '=', filters.agentSource)
+  if (filters.tag) {
+    q = q.where('id', 'in', (eb) =>
+      eb
+        .selectFrom('context_tags as ct')
+        .innerJoin('tags as t', 't.id', 'ct.tag_id')
+        .select('ct.context_id')
+        .where('t.name', '=', filters.tag as string),
+    )
+  }
+  q = q.orderBy('id', 'desc').limit(filters.limit ?? 50)
+
+  const rows = await q.execute()
+  const tagMap = await tagsByContext(
+    db,
+    rows.map((r) => r.id),
+  )
+  return rows.map((r) => toContext(r, tagMap.get(r.id) ?? []))
+}
+
+export async function updateContext(
+  db: Kysely<Database>,
+  id: string,
+  patch: UpdateInput,
+): Promise<Context | null> {
+  const existing = await db
+    .selectFrom('contexts')
+    .selectAll()
+    .where('id', '=', id)
+    .executeTakeFirst()
+  if (!existing) return null
+
+  const ts = nowIso()
+  await db.transaction().execute(async (trx) => {
+    const update: Updateable<ContextsTable> = { updated_at: ts }
+    if (patch.title !== undefined) update.title = patch.title
+    if (patch.body !== undefined) update.body = patch.body
+    if (patch.agentSource !== undefined) update.agent_source = patch.agentSource
+    if (patch.setMetadata) {
+      update.metadata = JSON.stringify({
+        ...parseMetadata(existing.metadata),
+        ...patch.setMetadata,
+      })
+    }
+    await trx.updateTable('contexts').set(update).where('id', '=', id).execute()
+
+    const addIds = await ensureTags(trx, patch.addTags ?? [])
+    if (addIds.length > 0) {
+      await trx
+        .insertInto('context_tags')
+        .values(addIds.map((tag_id) => ({ context_id: id, tag_id })))
+        .onConflict((oc) => oc.columns(['context_id', 'tag_id']).doNothing())
+        .execute()
+    }
+
+    if (patch.removeTags && patch.removeTags.length > 0) {
+      const rmRows = await trx
+        .selectFrom('tags')
+        .select('id')
+        .where('name', 'in', patch.removeTags)
+        .execute()
+      const rmIds = rmRows.map((r) => r.id)
+      if (rmIds.length > 0) {
+        await trx
+          .deleteFrom('context_tags')
+          .where('context_id', '=', id)
+          .where('tag_id', 'in', rmIds)
+          .execute()
+      }
+    }
+
+    await trx
+      .insertInto('context_history')
+      .values({
+        context_id: id,
+        event: 'update',
+        old_body: existing.body,
+        new_body: patch.body ?? existing.body,
+        agent_source: patch.agentSource ?? existing.agent_source,
+        changed_at: ts,
+      })
+      .execute()
+  })
+
+  return getContext(db, id)
+}
+
+/**
+ * Delete a context. Soft by default (sets deleted_at, keeps the row);
+ * `hard` removes it entirely. Either way an audit row is written.
+ */
+export async function deleteContext(
+  db: Kysely<Database>,
+  id: string,
+  opts: { hard?: boolean; agentSource?: string | null } = {},
+): Promise<boolean> {
+  const existing = await db
+    .selectFrom('contexts')
+    .selectAll()
+    .where('id', '=', id)
+    .executeTakeFirst()
+  if (!existing) return false
+
+  const ts = nowIso()
+  await db.transaction().execute(async (trx) => {
+    await trx
+      .insertInto('context_history')
+      .values({
+        context_id: id,
+        event: 'delete',
+        old_body: existing.body,
+        new_body: null,
+        agent_source: opts.agentSource ?? existing.agent_source,
+        changed_at: ts,
+      })
+      .execute()
+
+    if (opts.hard) {
+      await trx.deleteFrom('contexts').where('id', '=', id).execute()
+    } else {
+      await trx
+        .updateTable('contexts')
+        .set({ deleted_at: ts, updated_at: ts })
+        .where('id', '=', id)
+        .execute()
+    }
+  })
+  return true
+}
+
+export async function searchContexts(
+  db: Kysely<Database>,
+  query: string,
+  filters: ListFilters = {},
+): Promise<Context[]> {
+  const conditions = [sql`contexts_fts MATCH ${query}`, sql`c.deleted_at IS NULL`]
+  if (filters.namespace) conditions.push(sql`c.namespace = ${filters.namespace}`)
+  if (filters.kind) conditions.push(sql`c.kind = ${filters.kind}`)
+  if (filters.scope) conditions.push(sql`c.scope = ${filters.scope}`)
+  if (filters.agentSource) conditions.push(sql`c.agent_source = ${filters.agentSource}`)
+  if (filters.tag) {
+    conditions.push(
+      sql`c.id IN (
+        SELECT ct.context_id FROM context_tags ct
+        JOIN tags t ON t.id = ct.tag_id
+        WHERE t.name = ${filters.tag}
+      )`,
+    )
+  }
+  const where = sql.join(conditions, sql` AND `)
+  const limit = filters.limit ?? 50
+
+  const result = await sql<ContextRow>`
+    SELECT c.* FROM contexts c
+    JOIN contexts_fts ON contexts_fts.rowid = c.rowid
+    WHERE ${where}
+    ORDER BY bm25(contexts_fts)
+    LIMIT ${limit}
+  `.execute(db)
+
+  const rows = result.rows
+  const tagMap = await tagsByContext(
+    db,
+    rows.map((r) => r.id),
+  )
+  return rows.map((r) => toContext(r, tagMap.get(r.id) ?? []))
+}
