@@ -57,10 +57,17 @@ A **manual** files→DB sync (never auto-sync) for non-wiki contexts.
 - [x] Vitest `test/sync.test.ts` (round-trip id-honored, edit→update, create, namespace-scoped prune, dry-run, wiki-safety); 36 tests passing.
 - [x] Verified end-to-end on the `dist/` bundle: export store → edit a file → dry-run → import (get reflects edit) → delete file kept → `--prune` soft-deletes; plain `list`/wiki unaffected.
 
-### Still deferred (v4)
+### Out of core scope — potential future `plugins`
 
-- [ ] Optional vector/semantic retrieval (`sqlite-vec`) — out of scope per the wiki direction; could augment `wiki search` later.
-- [ ] `store` round-trip currently syncs title/body/tags (+merge metadata); `kind`/`namespace`/`scope` are treated as immutable identity. Could extend to sync structural fields if needed.
+Not part of the core app. The core stays embedding-free: retrieval is FTS5/BM25 + the
+typed `links` graph (the wiki direction). These belong in an optional plugin layer if/when
+one exists, so a user can opt into heavier deps without bloating the local-first core.
+
+- [ ] **Embeddings / semantic retrieval** (e.g. `sqlite-vec`) — vector search as an opt-in plugin that could augment `wiki search`. Explicitly **not** a core feature.
+
+### Known limitations (by design — not addressable as bugs)
+
+- **`store` round-trip syncs content, not identity.** On import-update, only `title`/`body`/`tags` (+merged `metadata`) flow back; `kind`/`namespace`/`scope`/`id` are treated as immutable structural identity (edits to them in a store `.md` are ignored on update — though all are honored on *create*). This is intentional: those axes file contexts for export-by-kind, `list --namespace`, the wiki firewall, and `--prune` scoping, so re-homing a row must be deliberate, not a side effect of a text edit. Confirmed correct.
 
 ## Hardening — multi-agent audit pass (shipped)
 
@@ -71,6 +78,26 @@ A 9-agent audit (6 dimension auditors → adversarial skeptic + completeness cri
 - **Firewall:** by-id context surfaces (`bctx get/update/rm`, MCP `get/update/delete_context`, the context resource) reject wiki pages → added `bctx wiki rm`; source pages stay immutable everywhere.
 - **Robustness:** `searchContexts` tolerates FTS5-special input (sanitized fallback, never crashes) and honors `includeDeleted`; `references` reserved for the auto channel (explicit links survive body re-sync); CRLF/BOM frontmatter parsed; bad files skipped (not fatal) on import; `.cursor/rules` filenames de-duped; CLI int options validated; zod errors print cleanly; lint excludes edges from soft-deleted pages; provenance timestamps + source `uri` preserved on wiki re-import; skill exec-bit honored faithfully.
 - Coverage: `test/audit.test.ts` (11 regression tests) added; **47 tests** total, all gates green.
+
+## v4 — Multi-project + online sync (shipped)
+
+The North Star foundation: one project's context shared across sessions, devices, and
+members. **Driver swapped to libSQL** (`@libsql/client` + `@libsql/kysely-libsql`),
+replacing better-sqlite3 — one URL-driven driver covers local files, embedded replicas,
+and remote connections, so "go online" is a config change, not a rewrite. No auth yet.
+
+- [x] **libSQL driver** — `src/core/db.ts` is now `openStore(DbTarget)` over `@libsql/client` (local file / embedded replica / remote), `withDb` syncs a replica before/after the op (`--no-sync` to skip), and `close()` tears down both Kysely and the client. The whole schema (FTS5 external-content + triggers + `bm25()`) validated on libSQL — **Phase 0 risk cleared**. Tests run on a temp **file** db (libSQL recreates its connection per transaction, which discards a `:memory:` db). BLOBs (skill files) normalized from ArrayBuffer → Buffer.
+- [x] **Project registry** — `src/core/registry.ts`: `~/.braincontext/config.json` (projects + currentProject) and `credentials.json` (tokens, `0600`, **never** in config.json); the legacy global `store.db` auto-registers as the `default` project. `resolveTarget` precedence: `--db`/`BCTX_DB` > `--global`/`--local` > `--project`/`BCTX_PROJECT` > current project > cwd `./.braincontext` > default. Global `--project`/`--no-sync` flags added.
+- [x] **`bctx project`** — `create`/`list`/`use`/`current`/`path`/`rm` (local) + `migrate-online`/`link`/`sync`/`status`/`disconnect` (online). `migrate-online` seeds a fresh remote primary from the local store (faithful, ids preserved — `src/core/dump.ts`), then re-bootstraps the local file as an embedded replica; `link` attaches another device to the same remote.
+- [x] **Sync semantics** — write-through to one primary (serialized → no multi-master conflict); distinct-ULID inserts merge, same-row edits are last-writer-wins with history retained. Online writes need connectivity (offline-write reconciliation deferred).
+- [x] Vitest: `test/registry.test.ts` (precedence, token isolation + 0600, default seed) and `test/online.test.ts` (FTS5 lock + faithful remote seed); **59 tests** total, all gates green.
+- [x] Verified end-to-end on `dist/`: project create/use/isolation/`--project` override/status/path/rm (local). The replica/sync round-trip needs a real `libsql://` remote (manually verifiable); the seed (its core) is unit-tested.
+
+> **Auth/permissions = North Star, not built.** Future managed control-plane: accounts,
+> project membership, RBAC (owner/editor/viewer), and server-minted scoped tokens
+> (`bctx login`, `bctx project share … --role editor`). Reuses `agent_source` +
+> `context_history` for attribution/audit. **Phase 3:** offline-write reconciliation
+> (Turso CDC / `updated_at` merge). **S3/R2** = backup only, never a sync backend.
 
 ## Notes / decisions
 

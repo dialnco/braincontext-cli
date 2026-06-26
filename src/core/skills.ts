@@ -3,6 +3,14 @@ import { ulid } from 'ulidx'
 import { type Context, getContext, listContexts } from './contexts'
 import type { Database } from './types'
 
+/** Normalize a stored BLOB to a Node Buffer (libSQL returns ArrayBuffer, not Buffer). */
+function toBuffer(v: unknown): Buffer {
+  if (Buffer.isBuffer(v)) return v
+  if (v instanceof ArrayBuffer) return Buffer.from(v)
+  if (ArrayBuffer.isView(v)) return Buffer.from(v.buffer, v.byteOffset, v.byteLength)
+  return Buffer.from(v as ArrayLike<number>)
+}
+
 export interface SkillFileInput {
   relPath: string
   content: Buffer
@@ -138,7 +146,8 @@ export async function loadSkill(db: Kysely<Database>, name: string): Promise<Loa
     context: ctx,
     files: files.map((f) => ({
       relPath: f.rel_path,
-      content: f.content,
+      // libSQL returns BLOBs as ArrayBuffer; normalize to Buffer for fs/consumers.
+      content: toBuffer(f.content),
       isExecutable: f.is_executable === 1,
     })),
   }

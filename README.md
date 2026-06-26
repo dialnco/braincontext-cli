@@ -3,7 +3,7 @@
 A **local-first** SQLite CLI for saving and retrieving shared **context** across AI
 coding agents (Claude, Codex, Cursor, ...). One local database, one binary: `bctx`.
 
-> Status: **v1 (barebones)**. See [`progress.md`](./progress.md) for the roadmap.
+> Status: **v4** — multi-project + online sync. See [`progress.md`](./progress.md) for the roadmap.
 
 ## Why
 
@@ -19,8 +19,10 @@ pnpm build
 pnpm link --global     # exposes `bctx` on your PATH
 ```
 
-Requires Node >= 22. `better-sqlite3` is a native module; pnpm's
-`onlyBuiltDependencies` allow-list (in `package.json`) lets it build on install.
+Requires Node >= 22. The store is **libSQL** (`@libsql/client`) — a SQLite-compatible
+engine that works as a plain local file **and** as an embedded replica that syncs with a
+remote primary (see [Projects & online sync](#projects--online-sync)). It ships prebuilt
+binaries, so there is no native compile step.
 
 ## Usage
 
@@ -34,13 +36,55 @@ bctx update <id> --add-tag important
 bctx rm <id>                                # soft-delete (reversible)
 ```
 
-Store precedence: `--db <path>` > `--global`/`--local` > `./.braincontext` (if present)
-> `~/.braincontext`.
+Store precedence: `--db <path>`/`BCTX_DB` > `--global`/`--local` >
+`--project`/`BCTX_PROJECT` > current project > `./.braincontext` (if present) >
+default project (`~/.braincontext/store.db`).
 
 ### Kinds & scopes
 
 - **kinds:** `note` (default), `rule`, `snippet`, `decision`, `skill`
 - **scopes:** `global`, `user`, `project` (default), `local`
+
+## Projects & online sync
+
+A **project** is a named store. Projects live under `~/.braincontext/` and you switch
+between them; each is isolated. The same project can go **online** so its context is
+shared across sessions, devices, and members — backed by a remote
+[libSQL/Turso](https://turso.tech) primary with a local **embedded replica** (local-speed
+reads; writes go to the primary and sync back).
+
+```bash
+bctx project create work            # ~/.braincontext/projects/work.db
+bctx project use work               # make it current
+bctx add --kind rule --title "Pkg mgr" <<< "Use pnpm"
+bctx project list                   # * marks the current project
+bctx --project personal list        # target another project for one command
+```
+
+**Going online** (bring your own libSQL URL — Turso's free tier or a self-hosted `sqld`):
+
+```bash
+# Device 1 — push the local project up to a fresh remote, then become a replica:
+bctx project migrate-online work --url libsql://work-org.turso.io --auth-token "$TOKEN"
+
+# Device 2 (or a teammate) — attach to the existing remote, bootstrap a local replica:
+bctx project link work --url libsql://work-org.turso.io --auth-token "$TOKEN"
+
+bctx project sync work              # pull the latest now (also runs automatically)
+bctx project status work            # mode, location, sync settings
+bctx project disconnect work        # revert to a plain local store
+```
+
+Writes are **write-through to one primary** (it serializes them, so there are no
+multi-master conflicts); concurrent edits to different entries merge cleanly (ULID ids),
+and same-entry edits are last-writer-wins with the prior value kept in history. Online
+writes require connectivity. **Tokens** are never stored in `config.json` — they live in
+`~/.braincontext/credentials.json` (mode `0600`) or `BCTX_TOKEN_<PROJECT>` env. Auth and
+per-member permissions are a planned managed-service layer; today, group members share a
+project token.
+
+> A plain SQLite file on S3/R2 is **not** a sync backend (single-writer only); use it for
+> backup, not multi-user sync. libSQL replicas are the supported path.
 
 ## Skills (for agents)
 

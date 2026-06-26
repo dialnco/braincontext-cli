@@ -4,10 +4,17 @@ import { type Context, getContext } from '../core/contexts'
 import type { DbOpts } from '../core/paths'
 import type { Database } from '../core/types'
 
-/** Pull the inherited global store flags (--db/--global/--local) off a command. */
+/** Pull the inherited global store flags (--db/--global/--local/--project/--no-sync). */
 export function dbOptsFrom(command: Command): DbOpts {
   const o = command.optsWithGlobals()
-  return { db: o.db, global: o.global, local: o.local }
+  // commander exposes `--no-sync` as `o.sync === false`.
+  return {
+    db: o.db,
+    global: o.global,
+    local: o.local,
+    project: o.project,
+    noSync: o.sync === false,
+  }
 }
 
 /**

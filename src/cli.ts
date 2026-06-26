@@ -8,6 +8,7 @@ import { importCommand } from './commands/import'
 import { initCommand } from './commands/init'
 import { listCommand } from './commands/list'
 import { mcpCommand } from './commands/mcp'
+import { projectCommand } from './commands/project'
 import { rmCommand } from './commands/rm'
 import { searchCommand } from './commands/search'
 import { skillCommand } from './commands/skill'
@@ -27,10 +28,14 @@ program
   )
   .version(getVersion(), '-v, --version')
   .option('--db <path>', 'explicit path to the SQLite store')
+  .option('--project <name>', 'use a named project from the registry')
   .option('--global', 'use the global store (~/.braincontext/store.db)')
   .option('--local', 'use the project store (./.braincontext/store.db)')
+  .option('--no-sync', 'skip the online sync for this command (replica projects)')
 
 program.addCommand(initCommand())
+// Project & sync management.
+program.addCommand(projectCommand())
 // Preferred workflow first.
 program.addCommand(wikiCommand())
 // Direct context operations (individual entries).
@@ -62,8 +67,14 @@ Individual context operations (single entries — CRUD):
   $ bctx list --kind rule --json   ·   bctx search "pnpm"   ·   bctx get <id>
   $ bctx update <id> --add-tag important   ·   bctx rm <id>
 
+Projects & online sync (same context across sessions, devices, members):
+  $ bctx project create work          ·   bctx project use work
+  $ bctx project migrate-online work --url libsql://… --auth-token …   # go online
+  $ bctx project link work --url libsql://… --auth-token …   # on another device
+
 Wiki pages are hidden from plain list/search (use --include-wiki to include them).
-Store precedence: --db > --global/--local > ./.braincontext (if present) > ~/.braincontext
+Store precedence: --db/BCTX_DB > --global/--local > --project/BCTX_PROJECT >
+current project > ./.braincontext (if present) > default project (~/.braincontext)
 `,
 )
 

@@ -32,14 +32,10 @@
     "test": "vitest run",
     "prepublishOnly": "pnpm run typecheck && pnpm run build && npx publint"
   },
-  "pnpm": {
-    "onlyBuiltDependencies": [
-      "better-sqlite3"
-    ]
-  },
   "dependencies": {
+    "@libsql/client": "^0.17.4",
+    "@libsql/kysely-libsql": "^0.4.1",
     "@modelcontextprotocol/sdk": "^1.29.0",
-    "better-sqlite3": "^12.11.1",
     "commander": "^15.0.0",
     "kysely": "^0.29.2",
     "ulidx": "^2.4.1",
@@ -48,7 +44,6 @@
   },
   "devDependencies": {
     "@biomejs/biome": "^2.5.1",
-    "@types/better-sqlite3": "^7.6.13",
     "@types/node": "^26.0.1",
     "publint": "^0.3.21",
     "tsup": "^8.5.1",

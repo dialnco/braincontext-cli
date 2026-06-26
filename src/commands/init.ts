@@ -1,7 +1,7 @@
 import { mkdirSync } from 'node:fs'
 import { dirname } from 'node:path'
 import { Command } from 'commander'
-import { openDb } from '../core/db'
+import { enableForeignKeys, openStore } from '../core/db'
 import { migrateToLatest } from '../core/migrate'
 import { type DbOpts, globalDbPath, localDbPath } from '../core/paths'
 import { dbOptsFrom } from './_shared'
@@ -18,11 +18,12 @@ export function initCommand(): Command {
     .action(async (_opts, command: Command) => {
       const path = initPath(dbOptsFrom(command))
       mkdirSync(dirname(path), { recursive: true })
-      const db = openDb(path)
+      const store = openStore({ mode: 'local', file: path })
       try {
-        await migrateToLatest(db)
+        await enableForeignKeys(store.db)
+        await migrateToLatest(store.db)
       } finally {
-        await db.destroy()
+        await store.close()
       }
       console.log(`Initialized braincontext store at ${path}`)
     })

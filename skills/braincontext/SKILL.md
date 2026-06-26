@@ -6,9 +6,16 @@ allowed-tools: Bash(bctx:*)
 
 # braincontext — shared context for agents
 
-`bctx` is a local-first CLI backed by a single SQLite file. It lets any agent
+`bctx` is a local-first CLI backed by a single libSQL/SQLite store. It lets any agent
 (Claude, Codex, Cursor, ...) **save** context and **retrieve** it later.
-Store precedence: `--db` > `--global`/`--local` > `./.braincontext` (if present) > `~/.braincontext`.
+Store precedence: `--db`/`BCTX_DB` > `--global`/`--local` > `--project`/`BCTX_PROJECT` >
+current project > `./.braincontext` (if present) > default project (`~/.braincontext`).
+
+**Projects:** a named store you can switch between (`bctx project use <name>`), optionally
+taken **online** so the same context syncs across sessions/devices/members. To target a
+specific project for one command, use `--project <name>` or `BCTX_PROJECT`. Online projects
+sync automatically on each command (write-through to one primary); pass `--no-sync` to skip.
+→ `references/projects.md`
 
 ## Two ways to use braincontext
 
@@ -67,4 +74,5 @@ bctx skills get braincontext --full        # this doc + all references
 - `references/schema.md` — the SQLite schema, kinds, and scopes
 - `references/workflows.md` — common save/retrieve/update flows
 - `references/search.md` — FTS5 query syntax and tips
+- `references/projects.md` — projects, switching, and online sync
 - **`bctx skills get braincontext-wiki`** — the preferred wiki workflow (linked knowledge)
