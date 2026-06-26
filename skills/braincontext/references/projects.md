@@ -60,16 +60,32 @@ bctx project disconnect work        # revert to a plain local store (keeps the f
 Token sources (in order): `--auth-token <t>` (persisted to `credentials.json`, `0600`),
 `--auth-token-env <VAR>` (read at runtime, not stored), or `BCTX_TOKEN_<PROJECT>` env.
 
-## What to know about sync
+## Concurrency — safe by default
+
+Multiple agents, sessions, and devices can read and write the **same** store at the same
+time. It's built for that:
+
+- **Local projects:** every `bctx` invocation is its own process; concurrent processes
+  coordinate at the file level (WAL + busy-timeout + retry), so simultaneous CRUD from many
+  agents is safe — no corruption, no lost writes.
+- Concurrent edits to **different** entries always merge (every entry has a unique ULID).
+  Concurrent edits to the **same** entry are **last-writer-wins**, with the prior value kept
+  in append-only history (nothing is silently lost).
+- You generally don't need to coordinate or lock — just CRUD. Use `bctx search`/`get` to
+  re-read current state when an edit depends on what's already there.
+
+## What to know about online sync
 
 - **Reads are local** (replica speed). **Writes go to the one primary**, which serializes
-  them — there is no multi-master conflict.
-- Concurrent edits to **different** entries merge cleanly (every entry has a unique ULID).
-  Concurrent edits to the **same** entry are last-writer-wins; the prior value is kept in
-  the append-only history.
+  them — there is no multi-master conflict — and propagate to all members on sync.
 - **Online writes require connectivity.** If you're offline, switch to a local project or
   expect writes to a replica to fail until reconnected.
 - Each command on a replica syncs before and after by default; pass `--no-sync` to skip for
   speed when freshness doesn't matter.
+- **Single writer per replica file (important):** a long-lived `bctx mcp` server on an
+  online project *owns* that replica file. Do **not** run concurrent `bctx` CLI writes
+  against the same online project on the same machine while the MCP server is running —
+  route writes through the one MCP server, or use a separate device (its own replica).
+  Different machines/replicas are always fine; the remote primary is always safe.
 - **Auth/permissions are not built yet** — group members currently share one project token.
   A managed control-plane (accounts, roles, per-member tokens) is planned.

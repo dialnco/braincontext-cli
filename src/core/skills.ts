@@ -1,6 +1,7 @@
 import type { Kysely } from 'kysely'
 import { ulid } from 'ulidx'
 import { type Context, getContext, listContexts } from './contexts'
+import { withWriteRetry } from './tx'
 import type { Database } from './types'
 
 /** Normalize a stored BLOB to a Node Buffer (libSQL returns ArrayBuffer, not Buffer). */
@@ -47,7 +48,7 @@ export async function importSkill(db: Kysely<Database>, input: ImportSkillInput)
   const ts = nowIso()
   const agentSource = input.agentSource ?? null
 
-  await db.transaction().execute(async (trx) => {
+  await withWriteRetry(db, async (trx) => {
     const existing = await trx
       .selectFrom('contexts')
       .select('id')
@@ -115,9 +116,24 @@ export async function importSkill(db: Kysely<Database>, input: ImportSkillInput)
     }
   })
 
-  const ctx = await getContext(db, id)
-  if (!ctx) throw new Error('Failed to import skill')
-  return ctx
+  // Build the result in-memory (no read-back: a replica file may not yet hold the
+  // just-written frames). Matches the row inserted above.
+  return {
+    id,
+    namespace: input.namespace ?? 'global',
+    title: input.name,
+    body: input.body,
+    kind: 'skill',
+    scope: 'project',
+    agentSource,
+    metadata: input.frontmatter ?? {},
+    pageType: null,
+    slug: null,
+    tags: [],
+    createdAt: ts,
+    updatedAt: ts,
+    deletedAt: null,
+  }
 }
 
 /** Load a stored skill bundle (context + sidecar files) by skill name. */

@@ -21,12 +21,33 @@ function fail(text: string) {
   return { content: [{ type: 'text' as const, text }], isError: true }
 }
 
+/** Usage guidance returned to agents at MCP connect time (initialize result). */
+const INSTRUCTIONS = `braincontext (bctx) — a shared, local-first context store for AI agents.
+
+Preferred workflow: build a linked knowledge wiki with the wiki_* tools for durable,
+interlinked knowledge; use the context tools (search/get/list/create/update/delete_context)
+for individual entries. Wiki pages are deliberately hidden from the plain context tools.
+
+Concurrency is safe by default: multiple agents/sessions/devices can read and write the
+same store at once. Writes are serialized and conflict-free; concurrent edits to different
+entries merge, and edits to the same entry are last-writer-wins with prior values kept in
+append-only history. delete_context is soft-delete only (recoverable).
+
+Online projects (a libSQL/Turso replica): reads are local-fast; writes go to the shared
+primary and propagate to all members, so they REQUIRE connectivity. This server owns its
+local replica file — while it is running, do not also run \`bctx\` CLI writes against the
+same online project on this machine; route writes through these tools (the single writer)
+or use a separate device/replica.`
+
 /**
  * Build an MCP server exposing the store. Full CRUD by default; delete is
  * soft-only (never a hard delete over MCP — history keeps it recoverable).
  */
 export function buildServer(db: Kysely<Database>): McpServer {
-  const server = new McpServer({ name: 'bctx', version: getVersion() })
+  const server = new McpServer(
+    { name: 'bctx', version: getVersion() },
+    { instructions: INSTRUCTIONS },
+  )
 
   server.registerTool(
     'search_contexts',

@@ -9,10 +9,18 @@ import {
   type UpdateInput,
   updateContext,
 } from './contexts'
+import { withWriteRetry } from './tx'
 import { type Database, type PageType, REFERENCES_LINK } from './types'
 
 function nowIso(): string {
   return new Date().toISOString()
+}
+
+/** A concurrent same-title create lost the slug race; the caller recomputes + retries. */
+function isSlugConflict(e: unknown): boolean {
+  return /UNIQUE constraint failed: contexts\.slug|idx_contexts_slug/i.test(
+    String((e as Error)?.message ?? e),
+  )
 }
 
 // ---------------------------------------------------------------------------
@@ -44,33 +52,37 @@ async function resolveWantedLinks(
   title: string,
 ): Promise<void> {
   const norm = normalizeTitle(title)
-  const wanted = await db
-    .selectFrom('links')
-    .select(['id', 'from_id', 'to_title', 'type'])
-    .where('to_id', 'is', null)
-    .where('to_title', 'is not', null)
-    .execute()
-  for (const w of wanted) {
-    if (!w.to_title || normalizeTitle(w.to_title) !== norm) continue
-    if (w.from_id === pageId) {
-      await db.deleteFrom('links').where('id', '=', w.id).execute() // would be a self-link
-      continue
-    }
-    const dup = await db
+  // One transaction so the dup-check + resolve is atomic (no concurrent writer can
+  // insert a colliding resolved edge between the check and the update).
+  await withWriteRetry(db, async (trx) => {
+    const wanted = await trx
       .selectFrom('links')
-      .select('id')
-      .where('from_id', '=', w.from_id)
-      .where('to_id', '=', pageId)
-      .where('type', '=', w.type)
-      .executeTakeFirst()
-    if (dup) await db.deleteFrom('links').where('id', '=', w.id).execute()
-    else
-      await db
-        .updateTable('links')
-        .set({ to_id: pageId, to_title: null })
-        .where('id', '=', w.id)
-        .execute()
-  }
+      .select(['id', 'from_id', 'to_title', 'type'])
+      .where('to_id', 'is', null)
+      .where('to_title', 'is not', null)
+      .execute()
+    for (const w of wanted) {
+      if (!w.to_title || normalizeTitle(w.to_title) !== norm) continue
+      if (w.from_id === pageId) {
+        await trx.deleteFrom('links').where('id', '=', w.id).execute() // would be a self-link
+        continue
+      }
+      const dup = await trx
+        .selectFrom('links')
+        .select('id')
+        .where('from_id', '=', w.from_id)
+        .where('to_id', '=', pageId)
+        .where('type', '=', w.type)
+        .executeTakeFirst()
+      if (dup) await trx.deleteFrom('links').where('id', '=', w.id).execute()
+      else
+        await trx
+          .updateTable('links')
+          .set({ to_id: pageId, to_title: null })
+          .where('id', '=', w.id)
+          .execute()
+    }
+  })
 }
 
 /** A unique-among-pages slug derived from `base`. */
@@ -90,25 +102,34 @@ async function uniqueSlug(db: Kysely<Database>, base: string): Promise<string> {
 
 export async function createPage(db: Kysely<Database>, input: CreatePageInput): Promise<Context> {
   // Always run the candidate through slugify so an imported/crafted slug can't
-  // contain path separators (export writes <slug>.md).
-  const slug = await uniqueSlug(db, slugify(input.slug ?? input.title))
-  const page = await createContext(db, {
-    title: input.title,
-    body: input.body ?? '',
-    kind: 'note',
-    namespace: input.namespace ?? 'wiki',
-    scope: 'project',
-    agentSource: input.agentSource ?? null,
-    tags: input.tags,
-    pageType: input.pageType,
-    slug,
-    createdAt: input.createdAt,
-    updatedAt: input.updatedAt,
-    metadata: input.metadata,
-  })
-  await syncBodyLinks(db, page.id, page.body)
-  await resolveWantedLinks(db, page.id, input.title)
-  return (await getPage(db, page.id)) ?? page
+  // contain path separators (export writes <slug>.md). A concurrent same-title
+  // create can lose the slug race; recompute and retry on that specific conflict.
+  for (let attempt = 1; ; attempt++) {
+    const slug = await uniqueSlug(db, slugify(input.slug ?? input.title))
+    let page: Context
+    try {
+      page = await createContext(db, {
+        title: input.title,
+        body: input.body ?? '',
+        kind: 'note',
+        namespace: input.namespace ?? 'wiki',
+        scope: 'project',
+        agentSource: input.agentSource ?? null,
+        tags: input.tags,
+        pageType: input.pageType,
+        slug,
+        createdAt: input.createdAt,
+        updatedAt: input.updatedAt,
+        metadata: input.metadata,
+      })
+    } catch (e) {
+      if (attempt < 6 && isSlugConflict(e)) continue
+      throw e
+    }
+    await syncBodyLinks(db, page.id, page.body)
+    await resolveWantedLinks(db, page.id, input.title)
+    return page
+  }
 }
 
 export async function recordSource(
@@ -122,22 +143,30 @@ export async function recordSource(
     updatedAt?: string
   },
 ): Promise<Context> {
-  const slug = await uniqueSlug(db, slugify(input.title))
-  const page = await createContext(db, {
-    title: input.title,
-    body: input.body,
-    kind: 'note',
-    namespace: 'wiki',
-    scope: 'project',
-    agentSource: input.agentSource ?? null,
-    pageType: 'source',
-    slug,
-    metadata: input.uri ? { uri: input.uri } : {},
-    createdAt: input.createdAt,
-    updatedAt: input.updatedAt,
-  })
-  await resolveWantedLinks(db, page.id, input.title)
-  return page
+  for (let attempt = 1; ; attempt++) {
+    const slug = await uniqueSlug(db, slugify(input.title))
+    let page: Context
+    try {
+      page = await createContext(db, {
+        title: input.title,
+        body: input.body,
+        kind: 'note',
+        namespace: 'wiki',
+        scope: 'project',
+        agentSource: input.agentSource ?? null,
+        pageType: 'source',
+        slug,
+        metadata: input.uri ? { uri: input.uri } : {},
+        createdAt: input.createdAt,
+        updatedAt: input.updatedAt,
+      })
+    } catch (e) {
+      if (attempt < 6 && isSlugConflict(e)) continue
+      throw e
+    }
+    await resolveWantedLinks(db, page.id, input.title)
+    return page
+  }
 }
 
 export async function getPage(db: Kysely<Database>, id: string): Promise<Context | null> {
@@ -288,6 +317,9 @@ export async function addLink(
       type: input.type,
       created_at: nowIso(),
     })
+    // The unique indexes (resolved + wanted) backstop the app-level dedup above so a
+    // concurrent insert that slipped past the check is a no-op, not a constraint error.
+    .onConflict((oc) => oc.doNothing())
     .execute()
 }
 
@@ -350,14 +382,18 @@ export async function backlinks(db: Kysely<Database>, id: string): Promise<LinkV
 
 /** Re-derive the reserved `references` channel from [[..]] in a body, leaving explicit edges intact. */
 export async function syncBodyLinks(db: Kysely<Database>, id: string, body: string): Promise<void> {
-  await db
-    .deleteFrom('links')
-    .where('from_id', '=', id)
-    .where('type', '=', REFERENCES_LINK)
-    .execute()
-  for (const title of parseWikiLinks(body)) {
-    await addLink(db, id, { toTitle: title, type: REFERENCES_LINK })
-  }
+  // One transaction so a concurrent reader never sees the transient zero-links state
+  // between the delete and the re-add (and two concurrent syncs can't interleave).
+  await withWriteRetry(db, async (trx) => {
+    await trx
+      .deleteFrom('links')
+      .where('from_id', '=', id)
+      .where('type', '=', REFERENCES_LINK)
+      .execute()
+    for (const title of parseWikiLinks(body)) {
+      await addLink(trx, id, { toTitle: title, type: REFERENCES_LINK })
+    }
+  })
 }
 
 // ---------------------------------------------------------------------------

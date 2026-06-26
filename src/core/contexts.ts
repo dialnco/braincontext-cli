@@ -1,5 +1,6 @@
 import { type Kysely, type Selectable, sql, type Updateable } from 'kysely'
 import { ulid } from 'ulidx'
+import { withWriteRetry } from './tx'
 import type { ContextsTable, Database, Kind, Scope } from './types'
 
 type ContextRow = Selectable<ContextsTable>
@@ -134,31 +135,35 @@ export async function createContext(db: Kysely<Database>, input: CreateInput): P
   const id = input.id ?? ulid()
   const ts = nowIso()
   const agentSource = input.agentSource ?? null
-  await db.transaction().execute(async (trx) => {
-    await trx
-      .insertInto('contexts')
-      .values({
-        id,
-        namespace: input.namespace ?? 'global',
-        title: input.title ?? null,
-        body: input.body,
-        kind: input.kind ?? 'note',
-        scope: input.scope ?? 'project',
-        agent_source: agentSource,
-        metadata: JSON.stringify(input.metadata ?? {}),
-        page_type: input.pageType ?? null,
-        slug: input.slug ?? null,
-        created_at: input.createdAt ?? ts,
-        updated_at: input.updatedAt ?? ts,
-        deleted_at: null,
-      })
-      .execute()
+  const tags = [...new Set((input.tags ?? []).map((t) => t.trim()).filter(Boolean))]
+  // Build the stored row once so we can also return it in-memory (no read-back —
+  // a replica's local file may not have the just-written frames yet).
+  const row: ContextRow = {
+    id,
+    namespace: input.namespace ?? 'global',
+    title: input.title ?? null,
+    body: input.body,
+    kind: input.kind ?? 'note',
+    scope: input.scope ?? 'project',
+    agent_source: agentSource,
+    metadata: JSON.stringify(input.metadata ?? {}),
+    page_type: input.pageType ?? null,
+    slug: input.slug ?? null,
+    created_at: input.createdAt ?? ts,
+    updated_at: input.updatedAt ?? ts,
+    deleted_at: null,
+  }
 
-    const tagIds = await ensureTags(trx, input.tags ?? [])
+  await withWriteRetry(db, async (trx) => {
+    await trx.insertInto('contexts').values(row).execute()
+
+    const tagIds = await ensureTags(trx, tags)
     if (tagIds.length > 0) {
       await trx
         .insertInto('context_tags')
         .values(tagIds.map((tag_id) => ({ context_id: id, tag_id })))
+        // re-create paths (import/dump) may replay the same pair concurrently
+        .onConflict((oc) => oc.columns(['context_id', 'tag_id']).doNothing())
         .execute()
     }
 
@@ -175,9 +180,7 @@ export async function createContext(db: Kysely<Database>, input: CreateInput): P
       .execute()
   })
 
-  const created = await getContext(db, id)
-  if (!created) throw new Error('Failed to create context')
-  return created
+  return toContext(row, [...tags].sort())
 }
 
 /** Fetch a single context by id. Returns soft-deleted rows too (caller decides). */
@@ -225,15 +228,18 @@ export async function updateContext(
   id: string,
   patch: UpdateInput,
 ): Promise<Context | null> {
-  const existing = await db
-    .selectFrom('contexts')
-    .selectAll()
-    .where('id', '=', id)
-    .executeTakeFirst()
-  if (!existing) return null
-
   const ts = nowIso()
-  await db.transaction().execute(async (trx) => {
+  // The read-modify-write happens entirely inside the IMMEDIATE transaction, so a
+  // concurrent writer can't slip between the read and the write (lost update) and
+  // the audit `old_body` always records the true immediate predecessor.
+  return withWriteRetry(db, async (trx) => {
+    const existing = await trx
+      .selectFrom('contexts')
+      .selectAll()
+      .where('id', '=', id)
+      .executeTakeFirst()
+    if (!existing) return null
+
     const update: Updateable<ContextsTable> = { updated_at: ts }
     if (patch.title !== undefined) update.title = patch.title
     if (patch.body !== undefined) update.body = patch.body
@@ -282,9 +288,19 @@ export async function updateContext(
         changed_at: ts,
       })
       .execute()
-  })
 
-  return getContext(db, id)
+    // Build the result from the post-write state read inside the same transaction.
+    const tags = (await tagsByContext(trx, [id])).get(id) ?? []
+    const resultRow: ContextRow = {
+      ...existing,
+      updated_at: ts,
+      title: patch.title !== undefined ? patch.title : existing.title,
+      body: patch.body !== undefined ? patch.body : existing.body,
+      agent_source: patch.agentSource !== undefined ? patch.agentSource : existing.agent_source,
+      metadata: typeof update.metadata === 'string' ? update.metadata : existing.metadata,
+    }
+    return toContext(resultRow, tags)
+  })
 }
 
 /**
@@ -296,15 +312,15 @@ export async function deleteContext(
   id: string,
   opts: { hard?: boolean; agentSource?: string | null } = {},
 ): Promise<boolean> {
-  const existing = await db
-    .selectFrom('contexts')
-    .selectAll()
-    .where('id', '=', id)
-    .executeTakeFirst()
-  if (!existing) return false
-
   const ts = nowIso()
-  await db.transaction().execute(async (trx) => {
+  return withWriteRetry(db, async (trx) => {
+    const existing = await trx
+      .selectFrom('contexts')
+      .select(['body', 'agent_source'])
+      .where('id', '=', id)
+      .executeTakeFirst()
+    if (!existing) return false
+
     await trx
       .insertInto('context_history')
       .values({
@@ -326,8 +342,8 @@ export async function deleteContext(
         .where('id', '=', id)
         .execute()
     }
+    return true
   })
-  return true
 }
 
 /** Quote each whitespace term so arbitrary input is a valid FTS5 MATCH expression. */

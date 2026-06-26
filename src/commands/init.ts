@@ -1,7 +1,7 @@
 import { mkdirSync } from 'node:fs'
 import { dirname } from 'node:path'
 import { Command } from 'commander'
-import { enableForeignKeys, openStore } from '../core/db'
+import { openStore } from '../core/db'
 import { migrateToLatest } from '../core/migrate'
 import { type DbOpts, globalDbPath, localDbPath } from '../core/paths'
 import { dbOptsFrom } from './_shared'
@@ -20,8 +20,8 @@ export function initCommand(): Command {
       mkdirSync(dirname(path), { recursive: true })
       const store = openStore({ mode: 'local', file: path })
       try {
-        await enableForeignKeys(store.db)
-        await migrateToLatest(store.db)
+        await store.prepare()
+        await migrateToLatest(store.db, { lockFile: path })
       } finally {
         await store.close()
       }

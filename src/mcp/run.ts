@@ -1,7 +1,7 @@
 import { mkdirSync } from 'node:fs'
 import { dirname } from 'node:path'
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
-import { enableForeignKeys, openStore } from '../core/db'
+import { openStore } from '../core/db'
 import { migrateToLatest } from '../core/migrate'
 import { type DbOpts, resolveTarget } from '../core/paths'
 import { buildServer } from './server'
@@ -16,9 +16,9 @@ export async function runMcpStdio(opts: DbOpts): Promise<void> {
   const target = resolveTarget(opts)
   if (target.mode !== 'remote') mkdirSync(dirname(target.file), { recursive: true })
   const store = openStore(target)
-  await enableForeignKeys(store.db)
+  await store.prepare()
   await store.sync()
-  await migrateToLatest(store.db)
+  await migrateToLatest(store.db, { lockFile: target.mode !== 'remote' ? target.file : undefined })
   const server = buildServer(store.db)
 
   let closing = false

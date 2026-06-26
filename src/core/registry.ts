@@ -1,7 +1,22 @@
-import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { isAbsolute, join } from 'node:path'
 import type { DbTarget } from './db'
+
+/** Write atomically (temp file + rename) so a concurrent reader/crash never sees a
+ * half-written or truncated registry file. */
+function atomicWrite(path: string, data: string, mode?: number): void {
+  const tmp = `${path}.${process.pid}.tmp`
+  writeFileSync(tmp, data, mode !== undefined ? { mode } : 'utf8')
+  renameSync(tmp, path)
+  if (mode !== undefined) {
+    try {
+      chmodSync(path, mode)
+    } catch {
+      // best-effort on platforms without POSIX perms
+    }
+  }
+}
 
 const HOME_DIR = '.braincontext'
 const CONFIG_FILE = 'config.json'
@@ -90,7 +105,7 @@ export function readConfig(): Config {
 
 export function writeConfig(cfg: Config): void {
   mkdirSync(homeDir(), { recursive: true })
-  writeFileSync(configPath(), `${JSON.stringify(cfg, null, 2)}\n`, 'utf8')
+  atomicWrite(configPath(), `${JSON.stringify(cfg, null, 2)}\n`)
 }
 
 // ── Credentials (tokens) live apart from config.json, with 0600 perms ──────────
@@ -110,13 +125,7 @@ function readCredentials(): Credentials {
 
 function writeCredentials(creds: Credentials): void {
   mkdirSync(homeDir(), { recursive: true })
-  const p = credentialsPath()
-  writeFileSync(p, `${JSON.stringify(creds, null, 2)}\n`, { mode: 0o600 })
-  try {
-    chmodSync(p, 0o600)
-  } catch {
-    // best-effort on platforms without POSIX perms
-  }
+  atomicWrite(credentialsPath(), `${JSON.stringify(creds, null, 2)}\n`, 0o600)
 }
 
 /** Persist (or clear, with `null`) a project's auth token in credentials.json. */

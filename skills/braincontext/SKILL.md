@@ -17,6 +17,11 @@ specific project for one command, use `--project <name>` or `BCTX_PROJECT`. Onli
 sync automatically on each command (write-through to one primary); pass `--no-sync` to skip.
 → `references/projects.md`
 
+**Concurrency is safe:** multiple agents can CRUD the same store simultaneously — writes
+serialize (no corruption/lost writes), and same-entry edits are last-writer-wins with prior
+values kept in history. One caveat: don't run CLI writes against an online project while a
+`bctx mcp` server owns that replica file on the same machine (see `references/projects.md`).
+
 ## Two ways to use braincontext
 
 - **Wiki (preferred)** — for durable, **interlinked** knowledge built from sources:

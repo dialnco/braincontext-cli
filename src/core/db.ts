@@ -21,9 +21,20 @@ export type DbTarget =
   | { mode: 'replica'; file: string; syncUrl: string; authToken?: string; syncInterval?: number }
   | { mode: 'remote'; url: string; authToken?: string }
 
+/**
+ * Busy timeout (ms) for local `file:` databases. Passed as the libSQL client
+ * `timeout` so it persists across the client's per-transaction reconnects (the
+ * sqlite3 client drops and lazily reopens its connection on `transaction()`, so a
+ * per-connection `PRAGMA busy_timeout` would NOT survive — the config value does).
+ * Without it, concurrent writers fail instantly with SQLITE_BUSY instead of queuing.
+ */
+const BUSY_TIMEOUT_MS = 5000
+
 export interface Store {
   db: Kysely<Database>
   client: Client
+  /** Apply per-store pragmas (WAL for files + foreign_keys). Run once after open. */
+  prepare(): Promise<void>
   /** Pull the latest frames from the primary. No-op unless this is a replica. */
   sync(): Promise<void>
   /** Tear down Kysely and close the underlying libSQL client. */
@@ -31,13 +42,14 @@ export interface Store {
 }
 
 function clientFor(t: DbTarget): Client {
-  if (t.mode === 'local') return createClient({ url: `file:${t.file}` })
+  if (t.mode === 'local') return createClient({ url: `file:${t.file}`, timeout: BUSY_TIMEOUT_MS })
   if (t.mode === 'replica') {
     return createClient({
       url: `file:${t.file}`,
       syncUrl: t.syncUrl,
       authToken: t.authToken,
       syncInterval: t.syncInterval,
+      timeout: BUSY_TIMEOUT_MS,
     })
   }
   return createClient({ url: t.url, authToken: t.authToken })
@@ -66,9 +78,17 @@ export function kyselyFor(client: Client): Kysely<Database> {
 export function openStore(t: DbTarget): Store {
   const client = clientFor(t)
   const db = kyselyFor(client)
+  const isFile = t.mode !== 'remote'
   return {
     db,
     client,
+    prepare: async () => {
+      // WAL lets readers proceed without blocking the single writer; it is a
+      // file-header-persistent mode, so setting it once sticks across reconnects.
+      if (isFile) await sql`PRAGMA journal_mode = WAL`.execute(db)
+      // libSQL defaults foreign_keys OFF — enforce referential integrity.
+      await sql`PRAGMA foreign_keys = ON`.execute(db)
+    },
     sync: async () => {
       if (t.mode === 'replica') await client.sync()
     },
@@ -77,11 +97,6 @@ export function openStore(t: DbTarget): Store {
       client.close()
     },
   }
-}
-
-/** libSQL defaults `foreign_keys` OFF; enforce referential integrity per connection. */
-export async function enableForeignKeys(db: Kysely<Database>): Promise<void> {
-  await sql`PRAGMA foreign_keys = ON`.execute(db)
 }
 
 /**
@@ -97,9 +112,11 @@ export async function withDb<T>(
   if (target.mode !== 'remote') mkdirSync(dirname(target.file), { recursive: true })
   const store = openStore(target)
   try {
-    await enableForeignKeys(store.db)
+    await store.prepare()
     if (!opts.noSync) await store.sync()
-    await migrateToLatest(store.db)
+    await migrateToLatest(store.db, {
+      lockFile: target.mode !== 'remote' ? target.file : undefined,
+    })
     const result = await fn(store.db)
     if (!opts.noSync) await store.sync()
     return result

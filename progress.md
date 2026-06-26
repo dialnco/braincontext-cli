@@ -99,6 +99,29 @@ and remote connections, so "go online" is a config change, not a rewrite. No aut
 > `context_history` for attribution/audit. **Phase 3:** offline-write reconciliation
 > (Turso CDC / `updated_at` merge). **S3/R2** = backup only, never a sync backend.
 
+## Concurrency hardening — multi-agent stress pass (shipped)
+
+A 5-dimension concurrency-hazard audit + a multi-process stress harness
+(`scripts/stress/`) drove these fixes. Stress harness spawns N independent OS
+processes (each its own libSQL connection = one "agent") and verifies data-integrity
+invariants after the burst; a companion remote harness hits a real Turso primary.
+
+- **The bleed (CRITICAL):** the libSQL swap had dropped WAL + busy_timeout, so concurrent writers failed instantly with `SQLITE_BUSY` (562/1067 ops failed at 8 workers). Fixed in `src/core/db.ts`: `journal_mode=WAL` (file-header-persistent) + libSQL Config `timeout: 5000` (busy_timeout that survives the client's per-transaction reconnect) + `src/core/tx.ts` `withWriteRetry` (capped backoff on busy/locked) around every write transaction.
+- **Migration race (CRITICAL):** Kysely's migration lock is a no-op on SQLite/libSQL, so concurrent first-runs crashed with "table already exists" (all workers died, 0 rows). Fixed in `src/core/migrate.ts`: a fast `isCurrent` pre-check (steady-state skips the migrator), a cross-process `O_EXCL` lockfile (`src/core/lock.ts`) so only one process migrates a local file, idempotent `IF NOT EXISTS` DDL, and benign-race tolerance for the remote path.
+- **Lost updates (HIGH):** `updateContext`/`deleteContext` read the row OUTSIDE the transaction → concurrent edits clobbered each other and the audit `old_body` was wrong. Fixed: the read-modify-write now happens entirely inside the IMMEDIATE transaction; writes return an in-memory object (no stale replica read-back, fixing the replica read-your-writes gap too).
+- **Missing UNIQUE constraints (HIGH):** added (in `0001_init`) partial unique indexes for resolved links `(from_id,type,to_id)`, wanted links `(from_id,type,lower(to_title))`, and one live skill per `(kind,title,namespace)`; `addLink`/`context_tags` inserts use `onConflict doNothing`; `syncBodyLinks`/`resolveWantedLinks` are now atomic; `createPage`/`recordSource` retry on the slug-uniqueness race.
+- **In-process write serialization (found via stress):** libSQL opens a fresh connection per `transaction()`, so *concurrent* writes from one process (e.g. the long-lived MCP connection handling concurrent tool calls) become many same-file connections — which SQLite's same-process locking handles poorly (5s busy stalls, even lost updates). `src/core/tx.ts` now chains writes per Kysely instance (one in-flight writer per connection): 40 concurrent writes went from a 5s timeout to **42ms**, 30 concurrent `setMetadata` on one row keep all 30 keys. Cross-process concurrency is unaffected (separate instances; busy_timeout + WAL coordinate).
+- **Verified — local:** 16 workers × 200 ops × 3 phases = **9,600 ops, 0 failures**; plus lost-update (1200 concurrent setMetadata on one row → **0 keys lost**, history chain intact), wiki (589 concurrent pages, **0 duplicate links**), skill (1200 concurrent imports of 3 names → exactly **3 live skills**). FTS integrity-check passes throughout.
+- **Verified — remote (Turso):** 5 concurrent clients CRUD the primary (0 failures, FTS works remotely); 3 replicas write-through + a fresh replica bootstrap **all converge to the identical set**.
+- **Registry & bootstrap atomicity (MEDIUM):** `config.json`/`credentials.json` writes are now atomic (temp-file + `rename`, `src/core/registry.ts`) so a concurrent `project` command can't read a half-written/truncated registry; `migrate-online`/`link` run under a cross-process bootstrap lockfile so two concurrent runs can't double-seed.
+- Coverage: `test/concurrency.test.ts` (concurrent first-run migration, concurrent writes serialize, lost-update guard). **62 tests**, all gates green.
+
+> **Known limitation (replica single-owner):** an embedded-replica file should have one
+> active syncer at a time. Running a long-lived `bctx mcp` on a replica project *and*
+> concurrent CLI commands against the same replica file (two independent syncers to one
+> file) is unsupported and can corrupt the local replica — use separate replica files
+> (devices) or route through the one MCP connection. The remote primary is always safe.
+
 ## Notes / decisions
 
 - **Driver:** better-sqlite3 over `node:sqlite` because the latter is still experimental on Node 22–24 and lacks migration-tool support; revisit on Node 26.

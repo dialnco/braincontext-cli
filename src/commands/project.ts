@@ -1,8 +1,9 @@
 import { mkdirSync, rmSync } from 'node:fs'
 import { dirname } from 'node:path'
 import { Command } from 'commander'
-import { type DbTarget, enableForeignKeys, openStore } from '../core/db'
+import { type DbTarget, openStore } from '../core/db'
 import { contextRowCount, seedDatabase } from '../core/dump'
+import { withFileLock } from '../core/lock'
 import { migrateToLatest } from '../core/migrate'
 import {
   addProject,
@@ -30,8 +31,10 @@ async function withTarget<T>(
   if (target.mode !== 'remote') mkdirSync(dirname(target.file), { recursive: true })
   const store = openStore(target)
   try {
-    await enableForeignKeys(store.db)
-    await migrateToLatest(store.db)
+    await store.prepare()
+    await migrateToLatest(store.db, {
+      lockFile: target.mode !== 'remote' ? target.file : undefined,
+    })
     return await fn(store.db)
   } finally {
     await store.close()
@@ -187,38 +190,42 @@ export function projectCommand(): Command {
         }
         const token = operationToken(name, opts)
         const syncInterval = parsePositiveInt(opts.syncInterval, 'sync-interval')
+        const localFile = projectFilePath(entry)
 
-        // 1. Prepare the remote primary, verify it is empty, and seed it from the local
-        //    store. Nothing is persisted until this succeeds, so a failure leaves the
-        //    project untouched (still local).
-        await reachRemote(opts.url, () =>
-          withTarget({ mode: 'remote', url: opts.url, authToken: token }, async (remote) => {
-            if ((await contextRowCount(remote)) > 0) {
-              throw new Error(
-                `Remote at ${opts.url} is not empty. Use \`bctx project link\` to attach to existing data.`,
-              )
+        // Serialize the whole bootstrap so two concurrent `migrate-online` runs can't
+        // double-seed the remote or race the local-file swap.
+        await withFileLock(`${localFile}.bootstrap.lock`, async () => {
+          // 1. Prepare the remote primary, verify it is empty, and seed it from the local
+          //    store. Nothing is persisted until this succeeds, so a failure leaves the
+          //    project untouched (still local).
+          await reachRemote(opts.url, () =>
+            withTarget({ mode: 'remote', url: opts.url, authToken: token }, async (remote) => {
+              if ((await contextRowCount(remote)) > 0) {
+                throw new Error(
+                  `Remote at ${opts.url} is not empty. Use \`bctx project link\` to attach to existing data.`,
+                )
+              }
+              await withTarget({ mode: 'local', file: localFile }, async (local) => {
+                const counts = await seedDatabase(local, remote)
+                console.error(`Seeded remote: ${counts.contexts} contexts, ${counts.links} links.`)
+              })
+            }),
+          )
+
+          // 2. Persist config + token, flip to replica.
+          if (opts.authToken) setToken(name, opts.authToken)
+          updateProject(name, { mode: 'replica', syncUrl: opts.url, syncInterval })
+
+          // 3. Re-bootstrap the local file as an embedded replica of the new primary.
+          removeDbFile(localFile)
+          await reachRemote(opts.url, async () => {
+            const store = openStore(projectToTarget(name, requireProject(name)))
+            try {
+              await store.sync()
+            } finally {
+              await store.close()
             }
-            const localFile = projectFilePath(entry)
-            await withTarget({ mode: 'local', file: localFile }, async (local) => {
-              const counts = await seedDatabase(local, remote)
-              console.error(`Seeded remote: ${counts.contexts} contexts, ${counts.links} links.`)
-            })
-          }),
-        )
-
-        // 2. Persist config + token, flip to replica.
-        if (opts.authToken) setToken(name, opts.authToken)
-        updateProject(name, { mode: 'replica', syncUrl: opts.url, syncInterval })
-
-        // 3. Re-bootstrap the local file as an embedded replica of the new primary.
-        removeDbFile(projectFilePath(entry))
-        await reachRemote(opts.url, async () => {
-          const store = openStore(projectToTarget(name, requireProject(name)))
-          try {
-            await store.sync()
-          } finally {
-            await store.close()
-          }
+          })
         })
         console.log(`Project "${name}" is now online (replica ⇄ ${opts.url}).`)
       },
@@ -252,20 +259,22 @@ export function projectCommand(): Command {
         // Bootstrap the local replica from the primary FIRST, so a failed connection
         // leaves nothing half-registered. Only persist after a successful sync.
         mkdirSync(dirname(file), { recursive: true })
-        await reachRemote(opts.url, async () => {
-          const store = openStore({
-            mode: 'replica',
-            file,
-            syncUrl: opts.url,
-            authToken: token,
-            syncInterval,
-          })
-          try {
-            await store.sync()
-          } finally {
-            await store.close()
-          }
-        })
+        await withFileLock(`${file}.bootstrap.lock`, () =>
+          reachRemote(opts.url, async () => {
+            const store = openStore({
+              mode: 'replica',
+              file,
+              syncUrl: opts.url,
+              authToken: token,
+              syncInterval,
+            })
+            try {
+              await store.sync()
+            } finally {
+              await store.close()
+            }
+          }),
+        )
 
         if (opts.authToken) setToken(name, opts.authToken)
         addProject(name, {
