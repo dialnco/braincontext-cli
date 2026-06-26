@@ -1,30 +1,25 @@
-import { mkdirSync } from 'node:fs'
-import { dirname } from 'node:path'
 import { Command } from 'commander'
-import { openStore } from '../core/db'
-import { migrateToLatest } from '../core/migrate'
-import { type DbOpts, globalDbPath, localDbPath } from '../core/paths'
+import { withDb } from '../core/db'
+import { resolveTarget } from '../core/paths'
 import { dbOptsFrom } from './_shared'
 
-function initPath(o: DbOpts): string {
-  if (o.db) return o.db
-  if (o.local) return localDbPath()
-  return globalDbPath()
+/** Human description of where a resolved target lives (file path or remote URL). */
+function describeTarget(opts: ReturnType<typeof dbOptsFrom>): string {
+  const t = resolveTarget(opts)
+  return t.mode === 'remote' ? t.url : t.file
 }
 
 export function initCommand(): Command {
   return new Command('init')
-    .description('Create and migrate the local braincontext SQLite store (idempotent).')
+    .description('Create and migrate the braincontext store for the resolved target (idempotent).')
     .action(async (_opts, command: Command) => {
-      const path = initPath(dbOptsFrom(command))
-      mkdirSync(dirname(path), { recursive: true })
-      const store = openStore({ mode: 'local', file: path })
-      try {
-        await store.prepare()
-        await migrateToLatest(store.db, { lockFile: path })
-      } finally {
-        await store.close()
-      }
-      console.log(`Initialized braincontext store at ${path}`)
+      const opts = dbOptsFrom(command)
+      // Use the same resolution every other command uses, so `init` honors
+      // --db/--global/--local/--project, BCTX_DB/BCTX_PROJECT/BCTX_HOME, and the
+      // current project. withDb opens, prepares (WAL/FK), syncs a replica, and
+      // migrates — exactly what the store needs, for local/replica/remote alike.
+      const where = describeTarget(opts)
+      await withDb(opts, async () => {})
+      console.log(`Initialized braincontext store at ${where}`)
     })
 }

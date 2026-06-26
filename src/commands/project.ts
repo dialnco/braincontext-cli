@@ -60,10 +60,12 @@ function operationToken(name: string, opts: { authToken?: string; authTokenEnv?:
   return resolved
 }
 
+/** Location of a target (path / replica-pair / url). The mode is shown separately
+ *  by callers, so it is not repeated here. */
 function describeTarget(t: DbTarget): string {
-  if (t.mode === 'remote') return `remote ${t.url}`
-  if (t.mode === 'replica') return `replica ${t.file} ⇄ ${t.syncUrl}`
-  return `local ${t.file}`
+  if (t.mode === 'remote') return t.url
+  if (t.mode === 'replica') return `${t.file} ⇄ ${t.syncUrl}`
+  return t.file
 }
 
 /** Delete a local sqlite file and its WAL/SHM/journal sidecars. */

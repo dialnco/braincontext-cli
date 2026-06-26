@@ -35,7 +35,10 @@ export function formatList(items: Context[]): string {
     .map((c) => {
       const label = c.title ?? truncate(c.body, 60)
       const tags = c.tags.length > 0 ? `  #${c.tags.join(' #')}` : ''
-      return `${c.id}  [${c.kind}]  ${label}${tags}`
+      // Wiki pages carry a pageType (concept/entity/source/…); show that instead
+      // of the underlying kind (always "note"). Mark soft-deleted rows (list --all).
+      const del = c.deletedAt ? '  (deleted)' : ''
+      return `${c.id}  [${c.pageType ?? c.kind}]  ${label}${tags}${del}`
     })
     .join('\n')
 }
