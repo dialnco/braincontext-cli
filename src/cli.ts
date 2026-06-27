@@ -13,6 +13,7 @@ import { rmCommand } from './commands/rm'
 import { searchCommand } from './commands/search'
 import { skillCommand } from './commands/skill'
 import { skillsCommand } from './commands/skills'
+import { studioCommand } from './commands/studio'
 import { updateCommand } from './commands/update'
 import { wikiCommand } from './commands/wiki'
 import { getVersion } from './lib/pkg'
@@ -51,6 +52,8 @@ program.addCommand(skillCommand())
 program.addCommand(exportCommand())
 program.addCommand(importCommand())
 program.addCommand(mcpCommand())
+// Human-facing surface: local web UI + JSON API.
+program.addCommand(studioCommand())
 
 program.addHelpText(
   'after',
