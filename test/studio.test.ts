@@ -4,6 +4,7 @@ import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { createContext } from '../src/core/contexts'
 import { buildStudioApp } from '../src/studio/server'
+import { staticProvider } from '../src/studio/stores'
 import { freshDb } from './_db'
 
 /** A stand-in for the built dist/studio (avoids needing a vite build in CI). */
@@ -17,7 +18,7 @@ describe('studio server', () => {
   it('serves health, index, SPA fallback, API 404, and seeded contexts', async () => {
     const db = await freshDb()
     await createContext(db, { body: 'Prefer pnpm over npm', kind: 'rule', tags: ['tooling'] })
-    const app = buildStudioApp(db, { staticDir: fakeStudioDir() })
+    const app = buildStudioApp(staticProvider(db), { staticDir: fakeStudioDir() })
 
     const health = await app.request('/api/health')
     expect(health.status).toBe(200)

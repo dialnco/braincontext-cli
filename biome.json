@@ -29,9 +29,13 @@
   },
   "overrides": [
     {
-      "includes": ["studio/src/wiki/MarkdownWiki.tsx"],
-      "linter": { "enabled": false },
-      "formatter": { "enabled": false }
+      "includes": ["studio/src/**"],
+      "linter": {
+        "rules": {
+          "a11y": "off",
+          "suspicious": { "noArrayIndexKey": "off" }
+        }
+      }
     }
   ]
 }

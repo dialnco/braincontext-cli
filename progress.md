@@ -122,6 +122,45 @@ invariants after the burst; a companion remote harness hits a real Turso primary
 > file) is unsupported and can corrupt the local replica — use separate replica files
 > (devices) or route through the one MCP connection. The remote primary is always safe.
 
+## v5 — Studio web UI (shipped)
+
+The human-facing surface: `bctx studio` now serves a full read/write SPA over the
+store, replacing the 1065-line mock "personal wiki" reference component with a
+decomposed app bound to the braincontext domain (wiki pages + typed links as the
+primary workspace, a Contexts tab for note/rule/snippet/decision/skill, an in-UI
+project switcher). Keeps the reference's warm paper/Spectral aesthetic; only the
+data/taxonomy changed. localhost-only, no auth (writes go through `core/`).
+
+- [x] **Backend API** — `src/studio/server.ts` is now a thin Hono mount over focused
+  route modules (`src/studio/routes/{health,contexts,wiki,projects,tags}.ts`) + `http.ts`
+  helpers; full CRUD/search/history for contexts, pages CRUD + links/backlinks/graph/log
+  for wiki, `/api/projects` + switch/sync. Every handler calls `core/` (anti-drift held).
+- [x] **StoreManager** (`src/studio/stores.ts`) — a `StoreProvider` injected into the app
+  so a runtime project switch swaps the live db under every handler (serialized, opens the
+  next store before closing the old; replica single-owner preserved). Tests use a trivial
+  `staticProvider` over `freshDb()`.
+- [x] **Core additions** — `listTags`/`listHistory` (`core/contexts.ts`), `wikiGraph`
+  (`core/wiki.ts`); `updatePage` already re-syncs `[[..]]` links on body PATCH.
+- [x] **Frontend decomposition** — god file → `studio/src/{api,lib,state,components,editor,views}`:
+  typed API client + DTOs, pure libs (markdown ⇄ html, wikilinks, force-graph, editor
+  blocks, theme), hash router + context + hooks, and components for sidebar/topbar/palette/
+  project-switcher/editor/backlinks/graph/contexts. No heavy state lib. `@ts-nocheck` dropped;
+  biome a11y relaxed for the inline-styled SPA only.
+- [x] **Editor** — contenteditable with slash menu, wikilink autocomplete (insert + create),
+  selection toolbar, hover previews, dual markdown pane; **10s debounced autosave** flushed on
+  blur / navigate / project-switch / `beforeunload` (per product decision — never per keystroke).
+- [x] **AGENTS.md export preview** — `previewExport` (`src/export/preview.ts`, filesystem-free,
+  reuses `renderAgentsBody`/`renderClaudeBody`/`renderMdc` + canonical managed block) behind
+  `GET /api/export/preview?targets`; Contexts tab gets an **Export** toggle → read-only tabbed
+  view of AGENTS.md / CLAUDE.md / .cursor/rules/*.mdc with copy-to-clipboard. Nothing is written.
+- [x] Vitest: `test/studio-api.test.ts` (contexts CRUD+search+history, wiki pages/links/backlinks/
+  graph/resolve + `[[..]]` autosync, export preview, projects/tags) via `app.request()`; **71 tests** total, green.
+- [x] **Verified end-to-end in a real browser** (agent-browser, isolated `BCTX_HOME`): page nav +
+  hash deep-links, edit → 10s autosave → DB-persisted, `[[..]]` autocomplete → insert → server
+  link-sync, graph (constellation/local/by-type), backlinks/properties, contexts list/filter/edit/
+  delete, export preview (AGENTS.md + .cursor rendering), ⌘K palette, theme toggle, Wiki↔Contexts
+  tabs, project switcher. Two bugs found+fixed (double-hash routing; contexts-tab redirect bounce).
+
 ## Notes / decisions
 
 - **Driver:** better-sqlite3 over `node:sqlite` because the latter is still experimental on Node 22–24 and lacks migration-tool support; revisit on Node 26.

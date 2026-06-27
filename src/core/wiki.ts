@@ -397,6 +397,65 @@ export async function syncBodyLinks(db: Kysely<Database>, id: string, body: stri
 }
 
 // ---------------------------------------------------------------------------
+// Graph (nodes = pages, edges = resolved typed links between them)
+// ---------------------------------------------------------------------------
+
+export interface GraphNode {
+  id: string
+  title: string | null
+  pageType: string | null
+  /** Undirected degree (inbound + outbound resolved edges within the graph). */
+  degree: number
+}
+
+export interface GraphEdge {
+  from: string
+  to: string
+  type: string
+}
+
+export interface WikiGraph {
+  nodes: GraphNode[]
+  edges: GraphEdge[]
+}
+
+/**
+ * The wiki knowledge graph: every live page is a node; every resolved link whose
+ * BOTH endpoints are live pages is an edge. Wanted (`to_id NULL`) links are omitted
+ * — they have no node to point at. Degree counts edges incident to each node.
+ */
+export async function wikiGraph(
+  db: Kysely<Database>,
+  opts: { namespace?: string } = {},
+): Promise<WikiGraph> {
+  const pages = await listPages(db, { namespace: opts.namespace, limit: 5000 })
+  const ids = new Set(pages.map((p) => p.id))
+
+  const rows = await db
+    .selectFrom('links')
+    .select(['from_id as from', 'to_id as to', 'type'])
+    .where('to_id', 'is not', null)
+    .execute()
+
+  const edges: GraphEdge[] = []
+  const degree = new Map<string, number>()
+  for (const r of rows) {
+    if (!r.to || !ids.has(r.from) || !ids.has(r.to)) continue
+    edges.push({ from: r.from, to: r.to, type: r.type })
+    degree.set(r.from, (degree.get(r.from) ?? 0) + 1)
+    degree.set(r.to, (degree.get(r.to) ?? 0) + 1)
+  }
+
+  const nodes: GraphNode[] = pages.map((p) => ({
+    id: p.id,
+    title: p.title,
+    pageType: p.pageType,
+    degree: degree.get(p.id) ?? 0,
+  }))
+  return { nodes, edges }
+}
+
+// ---------------------------------------------------------------------------
 // Operation log
 // ---------------------------------------------------------------------------
 
