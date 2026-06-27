@@ -1,0 +1,65 @@
+/* Base styles ported verbatim from the design's <helmet> block. */
+* {
+  box-sizing: border-box;
+}
+html,
+body {
+  margin: 0;
+  padding: 0;
+}
+#root {
+  height: 100%;
+}
+::selection {
+  background: rgba(106, 124, 255, 0.22);
+}
+[contenteditable]:focus {
+  outline: none;
+}
+.wl,
+.wikilink {
+  cursor: pointer;
+  transition: background 0.12s;
+}
+.wl:hover,
+.wikilink:hover {
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.scroll {
+  scrollbar-width: thin;
+  scrollbar-color: var(--border) transparent;
+}
+.scroll::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+.scroll::-webkit-scrollbar-thumb {
+  background: var(--border);
+  border-radius: 9px;
+  border: 3px solid transparent;
+  background-clip: padding-box;
+}
+.scroll::-webkit-scrollbar-track {
+  background: transparent;
+}
+@keyframes mw-fade {
+  from {
+    opacity: 0;
+    transform: translateY(5px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+@keyframes mw-pop {
+  from {
+    opacity: 0;
+    transform: scale(0.975);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
