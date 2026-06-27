@@ -2,9 +2,13 @@ import { existsSync } from 'node:fs'
 import { readFile } from 'node:fs/promises'
 import { extname, join, normalize, sep } from 'node:path'
 import { Hono } from 'hono'
-import type { Kysely } from 'kysely'
-import { listContexts } from '../core/contexts'
-import type { Database } from '../core/types'
+import { contextsRoutes } from './routes/contexts'
+import { exportRoutes } from './routes/export'
+import { healthRoutes } from './routes/health'
+import { projectsRoutes } from './routes/projects'
+import { tagsRoutes } from './routes/tags'
+import { wikiRoutes } from './routes/wiki'
+import type { StoreProvider } from './stores'
 
 // Exactly the extensions a Vite bundle emits. Correct Content-Type matters: a
 // `type="module"` script is rejected by browsers under the wrong MIME.
@@ -26,19 +30,23 @@ export interface StudioAppOpts {
 }
 
 /**
- * The Studio HTTP surface as a pure Hono app: a tiny read-only JSON API plus the
- * static SPA with history fallback. Pure (no socket) so it can be exercised via
- * `app.request()` in tests, mirroring the MCP server's injected-transport pattern.
+ * The Studio HTTP surface as a pure Hono app: a same-origin JSON API (mounted from
+ * the focused route modules in ./routes) plus the static SPA with history fallback.
+ * The store is reached through a {@link StoreProvider} so a project switch swaps the
+ * live db under every handler, and tests can inject a trivial in-memory provider
+ * (mirroring the MCP server's injected-transport pattern).
  */
-export function buildStudioApp(db: Kysely<Database>, opts: StudioAppOpts): Hono {
+export function buildStudioApp(provider: StoreProvider, opts: StudioAppOpts): Hono {
   const app = new Hono()
   const root = opts.staticDir
 
-  // --- read-only JSON API (same-origin) ---
-  app.get('/api/health', (c) =>
-    c.json({ status: 'ok', service: 'bctx-studio', time: new Date().toISOString() }),
-  )
-  app.get('/api/contexts', async (c) => c.json(await listContexts(db, { limit: 100 })))
+  // --- read/write JSON API (same-origin) ---
+  app.route('/api', healthRoutes())
+  app.route('/api', projectsRoutes(provider))
+  app.route('/api/contexts', contextsRoutes(provider))
+  app.route('/api/wiki', wikiRoutes(provider))
+  app.route('/api/tags', tagsRoutes(provider))
+  app.route('/api/export', exportRoutes(provider))
   // Keep the API namespace honest: an unknown /api/* is a JSON 404, never the SPA shell.
   app.all('/api/*', (c) => c.json({ error: 'not found' }, 404))
 
@@ -48,7 +56,7 @@ export function buildStudioApp(db: Kysely<Database>, opts: StudioAppOpts): Hono 
     if (hit) return c.body(hit.data, 200, { 'Content-Type': hit.type })
     const index = await tryFile(root, '/index.html')
     if (index) return c.body(index.data, 200, { 'Content-Type': index.type })
-    return c.text('studio UI not built — run `pnpm build`', 503)
+    return c.text('studio UI not built — run `npm run build`', 503)
   })
 
   return app

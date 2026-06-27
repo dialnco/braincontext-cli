@@ -1,0 +1,283 @@
+import { useCallback, useEffect, useRef, useState } from 'react'
+import type { Context, LinkView, WikiGraph } from '../api/types'
+import { wikiApi } from '../api/wiki'
+import { GraphOverlay } from '../components/graph/GraphOverlay'
+import { CommandPalette, type PaletteCommand } from '../components/layout/CommandPalette'
+import { ProjectSwitcher } from '../components/layout/ProjectSwitcher'
+import { Sidebar } from '../components/layout/Sidebar'
+import { TopBar } from '../components/layout/TopBar'
+import { RightPanel } from '../components/wiki/RightPanel'
+import { WikiEditor, type WikiEditorHandle } from '../editor/WikiEditor'
+import { sx } from '../lib/dc'
+import { pageHref, useRoute } from '../state/router'
+import { useApp } from '../state/StoreContext'
+import { useAsync } from '../state/useAsync'
+
+type Layout = 'three' | 'focus' | 'dual'
+
+interface Detail {
+  page: Context | null
+  links: LinkView[]
+  backlinks: LinkView[]
+}
+
+export function WikiView({ onNav }: { onNav: (v: 'wiki' | 'contexts') => void }) {
+  const app = useApp()
+  const route = useRoute()
+  const editorRef = useRef<WikiEditorHandle | null>(null)
+
+  const [layout, setLayout] = useState<Layout>('three')
+  const [graphOpen, setGraphOpen] = useState(false)
+  const [paletteOpen, setPaletteOpen] = useState(false)
+  const [projectsOpen, setProjectsOpen] = useState(false)
+  const [localRev, setLocalRev] = useState(0)
+
+  const projectKey = app.project?.project ?? ''
+  const pagesState = useAsync(() => wikiApi.list({ limit: 1000 }), [app.rev, projectKey])
+  const pages = pagesState.data ?? []
+
+  const onContextsRoute = route.parts[0] === 'contexts'
+  const routeId = route.parts[0] === 'page' ? route.parts[1] : undefined
+  const activeId = routeId ?? pages[0]?.id ?? null
+
+  // Default to the first page when at the wiki root. Guard against the `/contexts`
+  // route (where routeId is also undefined) so switching tabs doesn't bounce back here.
+  useEffect(() => {
+    if (!onContextsRoute && !routeId && pages[0]) route.navigate(pageHref(pages[0].id))
+  }, [onContextsRoute, routeId, pages, route])
+
+  const detail = useAsync<Detail>(async () => {
+    if (!activeId) return { page: null, links: [], backlinks: [] }
+    const [page, links, backlinks] = await Promise.all([
+      wikiApi.get(activeId).catch(() => null),
+      wikiApi.links(activeId).catch(() => [] as LinkView[]),
+      wikiApi.backlinks(activeId).catch(() => [] as LinkView[]),
+    ])
+    return { page, links, backlinks }
+  }, [activeId, app.rev, localRev])
+
+  const graphState = useAsync<WikiGraph>(
+    () => (graphOpen ? wikiApi.graph() : Promise.resolve({ nodes: [], edges: [] })),
+    [graphOpen, app.rev, localRev],
+  )
+
+  const flushThenNavigate = useCallback(
+    async (id: string) => {
+      await editorRef.current?.flush()
+      setGraphOpen(false)
+      route.navigate(pageHref(id))
+    },
+    [route],
+  )
+
+  const createPage = useCallback(
+    async (title: string): Promise<Context | null> => {
+      try {
+        const created = await wikiApi.create({ title, pageType: 'concept' })
+        pagesState.reload()
+        return created
+      } catch (e) {
+        app.toast(e instanceof Error ? e.message : 'Create failed')
+        return null
+      }
+    },
+    [pagesState, app],
+  )
+
+  const onNew = useCallback(async () => {
+    let n = 1
+    while (pages.find((p) => p.title === `Untitled ${n}`)) n++
+    const created = await createPage(`Untitled ${n}`)
+    if (created) await flushThenNavigate(created.id)
+  }, [pages, createPage, flushThenNavigate])
+
+  const onSave = useCallback(
+    async (md: string) => {
+      if (!activeId) return
+      await wikiApi.update(activeId, { body: md })
+      setLocalRev((r) => r + 1)
+    },
+    [activeId],
+  )
+
+  const onLinkMention = useCallback(
+    async (mentionId: string) => {
+      if (!activeId) return
+      try {
+        await wikiApi.addLink({ fromId: mentionId, toId: activeId, type: 'relates' })
+        setLocalRev((r) => r + 1)
+        app.toast('Linked')
+      } catch (e) {
+        app.toast(e instanceof Error ? e.message : 'Link failed')
+      }
+    },
+    [activeId, app],
+  )
+
+  // Global ⌘K.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && (e.key === 'k' || e.key === 'K')) {
+        e.preventDefault()
+        setPaletteOpen((o) => !o)
+      } else if (e.key === 'Escape') {
+        setProjectsOpen(false)
+        setPaletteOpen(false)
+        setGraphOpen(false)
+      }
+    }
+    document.addEventListener('keydown', onKey)
+    return () => document.removeEventListener('keydown', onKey)
+  }, [])
+
+  const page = detail.data?.page ?? null
+  const readOnly = page?.pageType === 'source'
+  const commands: PaletteCommand[] = [
+    {
+      label: 'Toggle theme',
+      hint: 'appearance',
+      run: () => {
+        setPaletteOpen(false)
+        app.toggleTheme()
+      },
+    },
+    {
+      label: 'Open graph view',
+      hint: 'view',
+      run: () => {
+        setPaletteOpen(false)
+        setGraphOpen(true)
+      },
+    },
+    {
+      label: 'New page',
+      hint: 'create',
+      run: () => {
+        setPaletteOpen(false)
+        void onNew()
+      },
+    },
+  ]
+
+  return (
+    <>
+      <TopBar
+        project={app.project}
+        onOpenProjects={() => setProjectsOpen((o) => !o)}
+        onSync={app.syncProject}
+        view="wiki"
+        onNav={onNav}
+        onOpenPalette={() => setPaletteOpen(true)}
+        layout={layout}
+        setLayout={setLayout}
+        graphOpen={graphOpen}
+        onEditor={() => setGraphOpen(false)}
+        onGraph={() => setGraphOpen(true)}
+        theme={app.theme}
+        onToggleTheme={app.toggleTheme}
+      />
+
+      <div style={sx('flex:1;min-height:0;display:flex;position:relative;')}>
+        {layout !== 'focus' && (
+          <Sidebar
+            pages={pages}
+            activeId={activeId}
+            edgeCount={countLinks(detail.data)}
+            onOpen={flushThenNavigate}
+            onNew={onNew}
+          />
+        )}
+
+        <div
+          style={sx(
+            'flex:1;min-width:0;background:var(--surface);display:flex;flex-direction:column;position:relative;',
+          )}
+        >
+          {page ? (
+            <div style={sx('flex:1;min-height:0;display:flex;flex-direction:column;')}>
+              <div style={sx('max-width:720px;margin:0 auto;width:100%;padding:30px 56px 0;')}>
+                <div
+                  style={sx("font:400 12px 'IBM Plex Mono';color:var(--muted);margin-bottom:14px;")}
+                >
+                  {page.pageType} {readOnly ? '· read-only source' : ''}
+                </div>
+                <div
+                  style={sx(
+                    "font:600 33px/1.18 'Spectral',serif;letter-spacing:-.014em;color:var(--ink);",
+                  )}
+                >
+                  {page.title || 'Untitled'}
+                </div>
+                <div style={sx('height:1px;background:var(--border);margin:18px 0 4px;')} />
+              </div>
+              <WikiEditor
+                key={page.id}
+                page={page}
+                pages={pages}
+                dual={layout === 'dual'}
+                readOnly={readOnly}
+                onSave={onSave}
+                onOpenPage={flushThenNavigate}
+                onCreatePage={createPage}
+                handleRef={editorRef}
+              />
+            </div>
+          ) : (
+            <div
+              style={sx(
+                "flex:1;display:flex;align-items:center;justify-content:center;font:400 16px 'Spectral',serif;font-style:italic;color:var(--muted);",
+              )}
+            >
+              {pagesState.loading
+                ? 'Loading…'
+                : 'No page selected. Create one with the + in the sidebar.'}
+            </div>
+          )}
+        </div>
+
+        {layout === 'three' && page && (
+          <RightPanel
+            page={page}
+            pages={pages}
+            links={detail.data?.links ?? []}
+            backlinks={detail.data?.backlinks ?? []}
+            onOpen={flushThenNavigate}
+            onExpandGraph={() => setGraphOpen(true)}
+            onLinkMention={onLinkMention}
+          />
+        )}
+
+        {graphOpen && (
+          <GraphOverlay
+            graph={graphState.data ?? { nodes: [], edges: [] }}
+            activeId={activeId}
+            onOpen={flushThenNavigate}
+            onClose={() => setGraphOpen(false)}
+          />
+        )}
+      </div>
+
+      {projectsOpen && (
+        <ProjectSwitcher
+          projects={app.projects}
+          onSwitch={app.switchProject}
+          onClose={() => setProjectsOpen(false)}
+        />
+      )}
+      {paletteOpen && (
+        <CommandPalette
+          pages={pages}
+          commands={commands}
+          onClose={() => setPaletteOpen(false)}
+          onOpen={flushThenNavigate}
+          onCreate={(t) => void createPage(t).then((p) => p && flushThenNavigate(p.id))}
+        />
+      )}
+    </>
+  )
+}
+
+function countLinks(d: Detail | undefined): number {
+  if (!d) return 0
+  return d.links.filter((l) => !l.wanted).length
+}

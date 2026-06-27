@@ -1,7 +1,7 @@
 import { type Kysely, type Selectable, sql, type Updateable } from 'kysely'
 import { ulid } from 'ulidx'
 import { withWriteRetry } from './tx'
-import type { ContextsTable, Database, Kind, Scope } from './types'
+import type { ContextsTable, Database, HistoryEvent, Kind, Scope } from './types'
 
 type ContextRow = Selectable<ContextsTable>
 
@@ -344,6 +344,60 @@ export async function deleteContext(
     }
     return true
   })
+}
+
+/** A tag with the count of its live (non-deleted) contexts. */
+export interface TagCount {
+  name: string
+  count: number
+}
+
+/** List all tags that have at least one live context, with usage counts (A→Z). */
+export async function listTags(db: Kysely<Database>): Promise<TagCount[]> {
+  const rows = await db
+    .selectFrom('context_tags as ct')
+    .innerJoin('tags as t', 't.id', 'ct.tag_id')
+    .innerJoin('contexts as c', 'c.id', 'ct.context_id')
+    .where('c.deleted_at', 'is', null)
+    .select('t.name as name')
+    .select((eb) => eb.fn.count<number>('ct.context_id').as('count'))
+    .groupBy('t.name')
+    .orderBy('t.name')
+    .execute()
+  return rows.map((r) => ({ name: r.name, count: Number(r.count) }))
+}
+
+/** One audit-trail entry for a context (newest-first via {@link listHistory}). */
+export interface HistoryEntry {
+  id: number
+  event: HistoryEvent
+  oldBody: string | null
+  newBody: string | null
+  agentSource: string | null
+  changedAt: string
+}
+
+/** The append-only history for a context, newest first. */
+export async function listHistory(
+  db: Kysely<Database>,
+  contextId: string,
+  limit = 50,
+): Promise<HistoryEntry[]> {
+  const rows = await db
+    .selectFrom('context_history')
+    .selectAll()
+    .where('context_id', '=', contextId)
+    .orderBy('id', 'desc')
+    .limit(limit)
+    .execute()
+  return rows.map((r) => ({
+    id: r.id,
+    event: r.event,
+    oldBody: r.old_body,
+    newBody: r.new_body,
+    agentSource: r.agent_source,
+    changedAt: r.changed_at,
+  }))
 }
 
 /** Quote each whitespace term so arbitrary input is a valid FTS5 MATCH expression. */

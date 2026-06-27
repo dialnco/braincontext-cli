@@ -34,7 +34,7 @@ type HovProps = {
   base?: React.CSSProperties
   hover?: React.CSSProperties
   children?: React.ReactNode
-  [key: string]: any
+  [key: string]: unknown
 }
 
 /**
@@ -57,13 +57,13 @@ export function Hov({
     {
       ...rest,
       style: h ? { ...base, ...hover } : base,
-      onMouseEnter: (e: any) => {
+      onMouseEnter: (e: React.MouseEvent) => {
         setH(true)
-        if (onMouseEnter) onMouseEnter(e)
+        if (typeof onMouseEnter === 'function') onMouseEnter(e)
       },
-      onMouseLeave: (e: any) => {
+      onMouseLeave: (e: React.MouseEvent) => {
         setH(false)
-        if (onMouseLeave) onMouseLeave(e)
+        if (typeof onMouseLeave === 'function') onMouseLeave(e)
       },
     },
     children,
