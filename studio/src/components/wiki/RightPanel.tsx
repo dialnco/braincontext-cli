@@ -10,6 +10,8 @@ interface Props {
   onOpen: (id: string) => void
   onExpandGraph: () => void
   onLinkMention: (mentionId: string) => void
+  tagFilter: string | null
+  onTagClick: (tag: string) => void
 }
 
 const DIVIDER = 'height:1px;background:var(--border);margin:18px 0;'
@@ -41,6 +43,8 @@ export function RightPanel({
   onOpen,
   onExpandGraph,
   onLinkMention,
+  tagFilter,
+  onTagClick,
 }: Props) {
   const [tab, setTab] = useState<'linked' | 'unlinked'>('linked')
 
@@ -87,16 +91,27 @@ export function RightPanel({
       </div>
       {page.tags.length > 0 && (
         <div style={sx('display:flex;flex-wrap:wrap;gap:6px;margin-top:12px;')}>
-          {page.tags.map((t) => (
-            <span
-              key={t}
-              style={sx(
-                "font:500 11px 'IBM Plex Mono';color:var(--accent-ink);background:var(--accent-soft);border-radius:6px;padding:2px 8px;",
-              )}
-            >
-              #{t}
-            </span>
-          ))}
+          {page.tags.map((t) => {
+            const on = t === tagFilter
+            return (
+              <Hov
+                key={t}
+                as="span"
+                base={sx(
+                  `font:500 11px 'IBM Plex Mono';border-radius:6px;padding:2px 8px;cursor:pointer;${on ? 'color:#fff;background:var(--accent);' : 'color:var(--accent-ink);background:var(--accent-soft);'}`,
+                )}
+                hover={sx(
+                  on
+                    ? 'background:var(--accent);'
+                    : 'background:var(--accent-soft);color:var(--accent);',
+                )}
+                onClick={() => onTagClick(t)}
+                title={on ? 'Clear tag filter' : `Filter pages tagged #${t}`}
+              >
+                #{t}
+              </Hov>
+            )
+          })}
         </div>
       )}
 
@@ -139,22 +154,42 @@ export function RightPanel({
           hover={sx('background:var(--accent-soft);')}
           onClick={() => lk.pageId && onOpen(lk.pageId)}
         >
-          <span style={sx("color:var(--accent);font:400 12px 'IBM Plex Mono';")}>→</span>
-          <span style={sx("flex:1;font:400 13px 'IBM Plex Sans';color:var(--ink-soft);")}>
+          <span style={sx("flex:0 0 auto;color:var(--accent);font:400 12px 'IBM Plex Mono';")}>
+            →
+          </span>
+          <span
+            style={sx(
+              "flex:1;min-width:0;overflow-wrap:anywhere;font:400 13px 'IBM Plex Sans';color:var(--ink-soft);",
+            )}
+          >
             {lk.title}
           </span>
-          <span style={sx("font:400 10px 'IBM Plex Mono';color:var(--muted);")}>{lk.type}</span>
+          <span
+            style={sx(
+              "flex:0 0 auto;white-space:nowrap;font:400 10px 'IBM Plex Mono';color:var(--muted);",
+            )}
+          >
+            {lk.type}
+          </span>
         </Hov>
       ))}
       {wanted.map((lk) => (
         <div key={lk.id} style={sx('display:flex;align-items:center;gap:8px;padding:5px 8px;')}>
-          <span style={sx("color:#c98a6a;font:400 12px 'IBM Plex Mono';")}>→</span>
+          <span style={sx("flex:0 0 auto;color:#c98a6a;font:400 12px 'IBM Plex Mono';")}>→</span>
           <span
-            style={sx("flex:1;font:400 13px 'IBM Plex Sans';color:var(--muted);font-style:italic;")}
+            style={sx(
+              "flex:1;min-width:0;overflow-wrap:anywhere;font:400 13px 'IBM Plex Sans';color:var(--muted);font-style:italic;",
+            )}
           >
             {lk.title}
           </span>
-          <span style={sx("font:400 10px 'IBM Plex Mono';color:#c98a6a;")}>wanted</span>
+          <span
+            style={sx(
+              "flex:0 0 auto;white-space:nowrap;font:400 10px 'IBM Plex Mono';color:#c98a6a;",
+            )}
+          >
+            wanted
+          </span>
         </div>
       ))}
 
@@ -187,7 +222,9 @@ export function RightPanel({
                 onClick={() => bl.pageId && onOpen(bl.pageId)}
               >
                 <div
-                  style={sx("font:500 12.5px 'IBM Plex Sans';color:var(--ink);margin-bottom:3px;")}
+                  style={sx(
+                    "overflow-wrap:anywhere;font:500 12.5px 'IBM Plex Sans';color:var(--ink);margin-bottom:3px;",
+                  )}
                 >
                   {bl.title}
                 </div>
@@ -216,7 +253,11 @@ export function RightPanel({
               <div
                 style={sx('display:flex;align-items:center;justify-content:space-between;gap:8px;')}
               >
-                <div style={sx("font:500 12.5px 'IBM Plex Sans';color:var(--ink);")}>
+                <div
+                  style={sx(
+                    "min-width:0;overflow-wrap:anywhere;font:500 12.5px 'IBM Plex Sans';color:var(--ink);",
+                  )}
+                >
                   {um.title || 'Untitled'}
                 </div>
                 <Hov

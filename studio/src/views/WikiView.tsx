@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { Context, LinkView, WikiGraph } from '../api/types'
 import { wikiApi } from '../api/wiki'
 import { GraphOverlay } from '../components/graph/GraphOverlay'
@@ -31,10 +31,18 @@ export function WikiView({ onNav }: { onNav: (v: 'wiki' | 'contexts') => void })
   const [paletteOpen, setPaletteOpen] = useState(false)
   const [projectsOpen, setProjectsOpen] = useState(false)
   const [localRev, setLocalRev] = useState(0)
+  const [tagFilter, setTagFilter] = useState<string | null>(null)
 
   const projectKey = app.project?.project ?? ''
   const pagesState = useAsync(() => wikiApi.list({ limit: 1000 }), [app.rev, projectKey])
   const pages = pagesState.data ?? []
+
+  // The sidebar list (only) is narrowed to the active tag; the full set still feeds
+  // link resolution in the editor, right panel, and palette.
+  const visiblePages = useMemo(
+    () => (tagFilter ? pages.filter((p) => p.tags.includes(tagFilter)) : pages),
+    [pages, tagFilter],
+  )
 
   const onContextsRoute = route.parts[0] === 'contexts'
   const routeId = route.parts[0] === 'page' ? route.parts[1] : undefined
@@ -180,11 +188,13 @@ export function WikiView({ onNav }: { onNav: (v: 'wiki' | 'contexts') => void })
       <div style={sx('flex:1;min-height:0;display:flex;position:relative;')}>
         {layout !== 'focus' && (
           <Sidebar
-            pages={pages}
+            pages={visiblePages}
             activeId={activeId}
             edgeCount={countLinks(detail.data)}
             onOpen={flushThenNavigate}
             onNew={onNew}
+            tagFilter={tagFilter}
+            onClearTag={() => setTagFilter(null)}
           />
         )}
 
@@ -248,6 +258,8 @@ export function WikiView({ onNav }: { onNav: (v: 'wiki' | 'contexts') => void })
             onOpen={flushThenNavigate}
             onExpandGraph={() => setGraphOpen(true)}
             onLinkMention={onLinkMention}
+            tagFilter={tagFilter}
+            onTagClick={(t) => setTagFilter((prev) => (prev === t ? null : t))}
           />
         )}
 
