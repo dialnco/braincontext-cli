@@ -68,7 +68,20 @@ export function htmlToMarkdown(html: string): string {
       let i = 1
       for (const li of el.querySelectorAll(':scope > li')) out.push(`${i++}. ${inline(li)}`)
     } else if (t === 'PRE') out.push(`\`\`\`\n${el.textContent?.replace(/\n+$/, '')}\n\`\`\``)
-    else if (t === 'HR') out.push('---')
+    else if (t === 'TABLE') {
+      const rows = [...el.querySelectorAll('tr')]
+      if (rows.length) {
+        const lines: string[] = []
+        rows.forEach((tr, ri) => {
+          const cells = [...tr.children].map((c) =>
+            inline(c).trim().replace(/\|/g, '\\|').replace(/\n/g, ' '),
+          )
+          lines.push(`| ${cells.join(' | ')} |`)
+          if (ri === 0) lines.push(`| ${cells.map(() => '---').join(' | ')} |`)
+        })
+        out.push(lines.join('\n'))
+      }
+    } else if (t === 'HR') out.push('---')
     else if (t === 'DIV') {
       const box = el.querySelector(':scope > .task-box')
       if (/accent-soft/.test(st) && el.querySelector('p')) {
@@ -137,6 +150,15 @@ export function markdownToHtml(md: string, resolveTitle: (title: string) => stri
       blocks.push(`<pre style="${S.code}">${esc(buf.join('\n'))}</pre>`)
       continue
     }
+    // GFM table: a pipe row immediately followed by a `|---|---|` delimiter row.
+    if (line.includes('|') && isTableDelim(at(i + 1))) {
+      const header = splitRow(line)
+      i += 2 // header + delimiter
+      const rows: string[][] = []
+      while (i < lines.length && at(i).trim() && at(i).includes('|')) rows.push(splitRow(at(i++)))
+      blocks.push(tableHtml(header, rows, renderInline))
+      continue
+    }
     if (/^#\s/.test(line)) blocks.push(`<h1 style="${S.h1}">${renderInline(line.slice(2))}</h1>`)
     else if (/^##\s/.test(line))
       blocks.push(`<h2 style="${S.h2}">${renderInline(line.slice(3))}</h2>`)
@@ -164,6 +186,39 @@ export function markdownToHtml(md: string, resolveTitle: (title: string) => stri
     i++
   }
   return blocks.join('\n') || `<p style="${S.p}"><br></p>`
+}
+
+/** True if `s` is a GFM table delimiter row (e.g. `|---|:--:|`), not a `---` rule. */
+function isTableDelim(s: string): boolean {
+  const t = (s ?? '').trim()
+  if (!t.includes('|') || !t.includes('-')) return false
+  return splitRow(t).every((c) => /^:?-+:?$/.test(c))
+}
+
+/** Split a table row into trimmed cells, dropping optional outer pipes and
+ *  honouring escaped `\|` so it round-trips with the serializer. */
+function splitRow(s: string): string[] {
+  return s
+    .trim()
+    .replace(/^\|/, '')
+    .replace(/\|$/, '')
+    .split(/(?<!\\)\|/)
+    .map((c) => c.trim().replace(/\\\|/g, '|'))
+}
+
+function tableHtml(
+  header: string[],
+  rows: string[][],
+  renderInline: (text: string) => string,
+): string {
+  const head = header.map((c) => `<th style="${S.th}">${renderInline(c)}</th>`).join('')
+  const body = rows
+    .map(
+      (r) =>
+        `<tr>${header.map((_, ci) => `<td style="${S.td}">${renderInline(r[ci] ?? '')}</td>`).join('')}</tr>`,
+    )
+    .join('')
+  return `<table style="${S.table}"><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table>`
 }
 
 function taskHtml(inner: string, checked: boolean): string {

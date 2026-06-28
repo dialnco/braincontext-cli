@@ -134,8 +134,16 @@ export function WikiEditor({
     ed.innerHTML = markdownToHtml(page.body, resolveTitle)
     ed.scrollTop = 0
     setWords((ed.textContent?.trim().match(/\S+/g) || []).length)
-    if (dual) setMd(htmlToMarkdown(ed.innerHTML))
   }, [page.id])
+
+  // Sync the dual-pane markdown source when it opens or the page changes. Without
+  // this it's only refreshed on edit, so toggling dual on a loaded page is blank.
+  // page.id is read indirectly (the load effect rewrites the editor on nav).
+  // biome-ignore lint/correctness/useExhaustiveDependencies: re-sync on page change
+  useEffect(() => {
+    const ed = edRef.current
+    if (dual && ed) setMd(htmlToMarkdown(ed.innerHTML))
+  }, [dual, page.id])
 
   const persist = useCallback(() => {
     const ed = edRef.current
@@ -622,7 +630,10 @@ export function WikiEditor({
   const slashRowsRender = slashMenu.open ? slashRows(slashMenu.q) : []
 
   return (
-    <div ref={hostRef} style={sx('flex:1;min-width:0;display:flex;position:relative;')}>
+    <div
+      ref={hostRef}
+      style={sx('flex:1;min-width:0;min-height:0;display:flex;position:relative;')}
+    >
       <div className="scroll" style={sx('flex:1;min-width:0;overflow-y:auto;')}>
         <div style={sx('max-width:720px;margin:0 auto;padding:34px 56px 120px;')}>
           <div

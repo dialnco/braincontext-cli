@@ -56,6 +56,10 @@ export const S = {
     'margin:0 0 18px;border:1px solid var(--border);background:var(--accent-soft);border-radius:11px;padding:13px 16px;',
   cT: "font:600 11px/1 'IBM Plex Mono',monospace;letter-spacing:.09em;text-transform:uppercase;color:var(--accent-ink);margin:0 0 6px;",
   cP: "font:400 16px/1.6 'Spectral',serif;color:var(--ink-soft);margin:0;",
+  table:
+    'border-collapse:collapse;margin:0 0 20px;max-width:100%;border:1px solid var(--border);border-radius:9px;overflow:hidden;',
+  th: "text-align:left;font:600 13.5px/1.5 'IBM Plex Sans',sans-serif;color:var(--ink);background:var(--code-bg);border:1px solid var(--border);padding:9px 14px;",
+  td: "font:400 16px/1.6 'Spectral',serif;color:var(--ink-soft);border:1px solid var(--border);padding:9px 14px;vertical-align:top;",
 } as const
 
 /** A short glyph per wiki page type, for the sidebar / palette / graph legend. */
