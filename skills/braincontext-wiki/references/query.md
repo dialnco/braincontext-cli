@@ -2,14 +2,15 @@
 
 Goal: answer a question from the wiki — and make the answer **compound**.
 
-1. **Locate** relevant pages:
+1. **Locate** relevant pages — start at the catalog, then search:
    ```bash
-   bctx wiki index            # scan the catalog
+   bctx wiki index            # scan the catalog (your map of what exists) first
    bctx wiki search "<q>"     # FTS5/BM25 ranked pages
    ```
 2. **Drill in**: `bctx wiki show "<title>"` to read a page plus its links and
    backlinks; follow links to gather connected context.
-3. **Synthesize** the answer for the user.
+3. **Synthesize** the answer for the user, **with citations** — name the pages/sources
+   you drew on (and `[[link]]` them) so the answer is traceable.
 4. **File it back** as a permanent page so the exploration isn't lost to chat:
    ```bash
    bctx wiki new "<question or topic>" --type analysis --file -

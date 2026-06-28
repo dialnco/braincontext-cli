@@ -301,7 +301,8 @@ export function wikiCommand(): Command {
         `  2. Link summary→source:    bctx wiki link "<summary>" "${title}" --type source`,
       )
       console.log('  3. Update ~5–15 related entity/concept pages, weaving in [[links]].')
-      console.log('  4. Review health:          bctx wiki lint')
+      console.log('  4. Refresh the catalog:    bctx wiki index --out index.md')
+      console.log('  5. Review health:          bctx wiki lint')
     })
 
   wiki

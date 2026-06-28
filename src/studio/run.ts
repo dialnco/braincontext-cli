@@ -3,6 +3,7 @@ import { serve } from '@hono/node-server'
 import type { Hono } from 'hono'
 import type { DbOpts } from '../core/paths'
 import { resolveStudioDir } from './assets'
+import { renderStudioBanner } from './banner'
 import { buildStudioApp } from './server'
 import { createStoreManager } from './stores'
 
@@ -51,10 +52,9 @@ export async function runStudio(opts: StudioOpts): Promise<void> {
   const label = status.project
     ? `${status.project} (${status.mode}) — ${status.location}`
     : status.location
-  console.error(`bctx studio: serving ${label}`)
-  console.error(`  UI   http://${HOST}:${port}/`)
-  console.error(`  API  http://${HOST}:${port}/api/health , /api/contexts , /api/wiki/pages`)
-  console.error('  Ctrl-C to stop.')
+  console.error(
+    renderStudioBanner({ url: `http://${HOST}:${port}`, storeLabel: label, host: HOST }),
+  )
 }
 
 /** Bind on HOST, incrementing the port on EADDRINUSE. Resolves the actual port. */

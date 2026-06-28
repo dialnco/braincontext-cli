@@ -32,7 +32,8 @@ export function registerWikiTools(server: McpServer, db: Kysely<Database>): void
     'wiki_search',
     {
       title: 'Search wiki',
-      description: 'Full-text search (FTS5/BM25) across wiki pages.',
+      description:
+        'Full-text search (FTS5/BM25) across wiki pages. After synthesizing a worthwhile answer, file it back with wiki_new {type:"analysis"} so the exploration compounds.',
       inputSchema: {
         query: z.string(),
         type: z.enum(AUTHORED_PAGE_TYPES).optional(),
@@ -125,8 +126,9 @@ export function registerWikiTools(server: McpServer, db: Kysely<Database>): void
         checklist: [
           'Write a summary page: wiki_new {type:"summary"}',
           'Link summary→source: wiki_link {type:"source"}',
-          'Update ~5–15 related entity/concept pages, weaving in [[links]]',
-          'Run wiki_lint to check health',
+          'Update ~5–15 related entity/concept pages, weaving in [[links]]; reconcile any contradictions',
+          'Refresh the catalog so it reflects the new/updated pages (bctx wiki index --out index.md)',
+          'Run wiki_lint to check health (orphans, dangling/wanted links, contradictions, data gaps)',
         ],
       })
     },

@@ -15,5 +15,6 @@ After fixing, re-run `bctx wiki lint` until clean, and append notable maintenanc
 the log implicitly (ingest/query operations are logged; see `bctx wiki log`).
 
 Also proactively look for: contradictions between pages, stale claims superseded by
-newer sources (link `--type supersedes`), and concepts important enough to deserve
-their own page. Suggest new questions/sources to the user.
+newer sources (link `--type supersedes`), concepts important enough to deserve their own
+page, and **data gaps** — questions the wiki can't yet answer for lack of a source.
+Surface these to the user and suggest new questions/sources to fill them.
