@@ -90,8 +90,11 @@ export function wikiRoutes(provider: StoreProvider): Hono {
       const updated = await updatePage(provider.db(), c.req.param('id'), parsed.data)
       return updated ? c.json(updated) : c.json({ error: 'not found' }, 404)
     } catch (e) {
-      // source pages are immutable (updatePage throws)
-      return c.json({ error: (e as Error).message }, 409)
+      const msg = (e as Error).message
+      // 409 only for the expected immutable-source conflict; anything else is a real 500
+      // (don't leak raw internals or mislabel every failure as a conflict).
+      if (/immutable/i.test(msg)) return c.json({ error: msg }, 409)
+      return c.json({ error: 'update failed' }, 500)
     }
   })
 

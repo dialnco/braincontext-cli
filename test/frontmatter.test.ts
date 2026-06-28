@@ -21,4 +21,16 @@ describe('frontmatter', () => {
     expect(data).toEqual({})
     expect(body).toBe('no frontmatter here')
   })
+
+  it('preserves the blank line after the closing --- (byte round-trip)', () => {
+    const original = '---\nname: demo\n---\n\n# Title\n\nBody.\n'
+    const { data, body } = parseFrontmatter<Record<string, unknown>>(original)
+    expect(stringifyFrontmatter(data, body)).toBe(original)
+  })
+
+  it('does not invent a blank line when there was none', () => {
+    const original = '---\nname: demo\n---\nBody.\n'
+    const { data, body } = parseFrontmatter<Record<string, unknown>>(original)
+    expect(stringifyFrontmatter(data, body)).toBe(original)
+  })
 })

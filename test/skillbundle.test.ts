@@ -90,6 +90,43 @@ describe('skill bundles', () => {
     await db.destroy()
   })
 
+  it('re-import deletes the prior bundle’s skill_files (CASCADE does not fire in a libSQL txn)', async () => {
+    const db = await freshDb()
+    const parsed = readSkillDir(makeSkillDir())
+    const input = {
+      name: parsed.name,
+      description: parsed.description,
+      body: parsed.body,
+      frontmatter: parsed.frontmatter,
+      files: parsed.files,
+    }
+    await importSkill(db, input)
+    await importSkill(db, input)
+    // exactly the latest bundle's sidecars survive — the first import's rows must not orphan
+    const rows = await db.selectFrom('skill_files').selectAll().execute()
+    expect(rows.length).toBe(parsed.files.length)
+    await db.destroy()
+  })
+
+  it('loadSkill disambiguates by namespace; a name in two namespaces throws', async () => {
+    const db = await freshDb()
+    const parsed = readSkillDir(makeSkillDir())
+    const base = {
+      name: parsed.name,
+      description: parsed.description,
+      body: parsed.body,
+      frontmatter: parsed.frontmatter,
+      files: parsed.files,
+    }
+    await importSkill(db, { ...base, namespace: 'global' })
+    await importSkill(db, { ...base, namespace: 'work' })
+
+    await expect(loadSkill(db, 'demo-skill')).rejects.toThrow(/multiple namespaces/)
+    const loaded = await loadSkill(db, 'demo-skill', 'work')
+    expect(loaded).not.toBeNull()
+    await db.destroy()
+  })
+
   it('rejects bad kebab and name != folder', () => {
     expect(
       validateSkill({ name: 'Demo_Skill', description: 'x', dirName: 'Demo_Skill' }).length,

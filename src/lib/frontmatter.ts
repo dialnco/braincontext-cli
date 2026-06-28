@@ -26,6 +26,9 @@ export function parseFrontmatter<T = Record<string, unknown>>(md: string): Front
 export function stringifyFrontmatter(data: Record<string, unknown>, body: string): string {
   // lineWidth: 0 disables line wrapping so long descriptions stay single-line.
   const yaml = stringifyYaml(data, { lineWidth: 0 }).replace(/\n$/, '')
-  const sep = body.startsWith('\n') ? '' : '\n'
-  return `---\n${yaml}\n---${sep}${body}`
+  // Always emit exactly the single newline that terminates the closing `---` line, then the
+  // body verbatim. `parseFrontmatter` consumes that one terminator, so `body` already carries
+  // any blank line that followed it — the previous `startsWith('\n') ? '' : '\n'` logic
+  // swallowed that blank line and broke the byte-for-byte round-trip.
+  return `---\n${yaml}\n---\n${body}`
 }

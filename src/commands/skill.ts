@@ -2,6 +2,7 @@ import { basename, resolve } from 'node:path'
 import { Command } from 'commander'
 import { withDb } from '../core/db'
 import { importSkill, listSkillContexts, loadSkill } from '../core/skills'
+import { resolveAgent } from '../lib/agent'
 import { formatList } from '../lib/format'
 import { readSkillDir } from '../skillbundles/parse'
 import { reconstructSkill } from '../skillbundles/reconstruct'
@@ -49,7 +50,7 @@ export function skillCommand(): Command {
           frontmatter: parsed.frontmatter,
           files: parsed.files,
           namespace: opts.namespace,
-          agentSource: opts.agent ?? null,
+          agentSource: resolveAgent(opts.agent),
         }),
       )
 
@@ -63,8 +64,9 @@ export function skillCommand(): Command {
   skill
     .command('export <name> <dir>')
     .description('Reconstruct a stored skill on disk (SKILL.md + sidecars, chmod +x scripts/).')
-    .action(async (name: string, dir: string, _opts, command: Command) => {
-      const loaded = await withDb(dbOptsFrom(command), (db) => loadSkill(db, name))
+    .option('--namespace <ns>', 'disambiguate when the name exists in multiple namespaces')
+    .action(async (name: string, dir: string, opts, command: Command) => {
+      const loaded = await withDb(dbOptsFrom(command), (db) => loadSkill(db, name, opts.namespace))
       if (!loaded) {
         console.error(`No stored skill named "${name}".`)
         process.exitCode = 1

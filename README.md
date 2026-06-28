@@ -3,7 +3,8 @@
 A **local-first** SQLite CLI for saving and retrieving shared **context** across AI
 coding agents (Claude, Codex, Cursor, ...). One local database, one binary: `bctx`.
 
-> Status: **v4** — multi-project + online sync. See [`progress.md`](./progress.md) for the roadmap.
+> Status: **v5** — multi-project + online sync + a local **Studio** web UI. See
+> [`progress.md`](./progress.md) for the roadmap.
 
 ## Why
 
@@ -28,11 +29,13 @@ binaries, so there is no native compile step.
 
 ```bash
 bctx init                                   # create the store (idempotent)
+bctx status                                 # orient: store, counts, AGENTS.md staleness
 echo "Use pnpm, never npm" | bctx add --kind rule --tags tooling --agent claude
 bctx list --json
 bctx search "pnpm"
 bctx get <id> --json
 bctx update <id> --add-tag important
+bctx update <id> --kind decision --scope user   # correct kind/scope/namespace too
 bctx rm <id>                                # soft-delete (reversible)
 ```
 
@@ -135,6 +138,7 @@ bctx export --out .                  # AGENTS.md + CLAUDE.md(@AGENTS.md) + .curs
 bctx export --targets agents,cursor  # pick targets
 bctx export --dry-run                # show what would change
 bctx export --check                  # exit non-zero if stale (CI)
+bctx export --watch                  # re-export on every store change (Ctrl-C to stop)
 ```
 
 `AGENTS.md` is canonical (sections by kind, read by 60+ agents); `CLAUDE.md` just
@@ -196,14 +200,35 @@ Ingestion is **agent-driven**: the CLI stores/links/searches/lints; an agent (vi
 MCP `wiki_*` tools + the bundled `braincontext-wiki` skill) does the synthesis. See
 `bctx skills get braincontext-wiki --full`.
 
+## Studio (web UI)
+
+The human-facing surface: a local read/write SPA + same-origin JSON API over the store —
+browse and edit the wiki (pages + typed links, graph view, backlinks), manage contexts,
+preview the `AGENTS.md`/`CLAUDE.md`/`.cursor` export, and switch projects.
+
+```bash
+bctx studio                 # serve on http://127.0.0.1:8420 (auto-increments if busy)
+bctx studio -p 9000         # pick a port
+bctx --project work studio  # serve a specific project (or BCTX_PROJECT)
+```
+
+**Binds `127.0.0.1` only** — the API exposes (and writes) store contents with no auth, so it
+is not reachable from other machines, and a `Host`/`Origin` allowlist blocks cross-site
+(CSRF / DNS-rebinding) access from pages you visit in a browser. Like `bctx mcp`, Studio owns
+the store while running: don't run concurrent `bctx` CLI writes against the same **online
+(replica)** project on this machine while it is up. Requires a build (`pnpm build` produces
+`dist/studio`); for development use `pnpm studio:dev` (Vite HMR).
+
 ## Development
 
 ```bash
 pnpm dev <args>        # run the CLI from source (tsx)
-pnpm typecheck         # tsc --noEmit
+pnpm studio:dev        # run the Studio SPA with Vite HMR
+pnpm typecheck         # tsc --noEmit (CLI)
+pnpm typecheck:studio  # tsc --noEmit (Studio SPA)
 pnpm test              # vitest
 pnpm lint              # biome
-pnpm build             # tsup -> dist/cli.js
+pnpm build             # tsup -> dist/cli.js  +  vite -> dist/studio
 ```
 
 ## Architecture
@@ -225,5 +250,9 @@ skills/braincontext/       shipped CLI agent docs
 skills/braincontext-wiki/  shipped wiki-maintainer skill
 ```
 
-Every surface — CLI commands, the MCP server, export, skill bundles, and the wiki —
-goes through `core/`, never raw SQL, so they can't drift. See `progress.md`.
+Every surface — CLI commands, the MCP server, export, skill bundles, the wiki, and the
+Studio web UI — goes through `core/`, never raw SQL, so they can't drift. See `progress.md`.
+
+## License
+
+[MIT](./LICENSE) © Dial Cortez.

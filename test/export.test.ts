@@ -45,6 +45,20 @@ describe('export', () => {
     await db.destroy()
   })
 
+  it('always emits a self-onboarding preamble, even for an empty store', async () => {
+    const db = await freshDb()
+    const out = mkdtempSync(join(tmpdir(), 'bctx-exp-'))
+    // no contexts stored at all — the managed block must still tell an agent the store exists
+    const r = runExport(await selectContexts(db, {}), { outDir: out, targets: ['agents'] })
+    expect(r.changed.length).toBe(1)
+    const agents = readFileSync(join(out, 'AGENTS.md'), 'utf8')
+    expect(agents).toContain('braincontext')
+    expect(agents).toContain('bctx wiki search')
+    expect(agents).toContain('bctx mcp')
+    rmSync(out, { recursive: true, force: true })
+    await db.destroy()
+  })
+
   it('preserves hand-written content outside the managed fence', async () => {
     const db = await freshDb()
     await createContext(db, { body: 'a rule', kind: 'rule', title: 'R' })

@@ -646,6 +646,7 @@ export function WikiEditor({
             onKeyUp={onKeyUp}
             onKeyDown={onKeyDown}
             onClick={onClick}
+            onBlur={() => void autosave.flush()}
             onMouseUp={() => setTimeout(checkSelection, 0)}
             onMouseOver={onOver}
             onMouseOut={onOut}
@@ -990,8 +991,9 @@ function currentBlockType(ed: HTMLElement): string {
 }
 
 function excerpt(body: string): string {
-  const tmp = document.createElement('div')
-  tmp.innerHTML = body
-  const text = (tmp.textContent || body).replace(/\s+/g, ' ').trim()
+  // Parse inertly: `DOMParser` does NOT run scripts or load resources, unlike assigning a
+  // stored body to `el.innerHTML` (which fires `<img onerror=...>` — a DOM-XSS sink).
+  const parsed = new DOMParser().parseFromString(body, 'text/html').body.textContent ?? body
+  const text = parsed.replace(/\s+/g, ' ').trim()
   return text.length > 140 ? `${text.slice(0, 140)}…` : text
 }

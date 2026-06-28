@@ -1,7 +1,7 @@
 import { existsSync } from 'node:fs'
 import { readFile } from 'node:fs/promises'
 import { extname, join, normalize, sep } from 'node:path'
-import { Hono } from 'hono'
+import { Hono, type MiddlewareHandler } from 'hono'
 import { contextsRoutes } from './routes/contexts'
 import { exportRoutes } from './routes/export'
 import { healthRoutes } from './routes/health'
@@ -29,6 +29,57 @@ export interface StudioAppOpts {
   staticDir: string
 }
 
+// Loopback host names. The server binds 127.0.0.1, but that alone does not stop a
+// *browser* the user is running from reaching the API, so we also gate on Host/Origin.
+const LOOPBACK_HOSTS = new Set(['127.0.0.1', 'localhost', '[::1]', '::1'])
+const UNSAFE_METHODS = new Set(['POST', 'PUT', 'PATCH', 'DELETE'])
+
+/** Extract the host (sans port) from a `Host` header value, keeping IPv6 brackets. */
+function hostWithoutPort(h: string): string {
+  if (h.startsWith('[')) {
+    const end = h.indexOf(']')
+    return end === -1 ? h : h.slice(0, end + 1)
+  }
+  const colon = h.indexOf(':')
+  return colon === -1 ? h : h.slice(0, colon)
+}
+
+/** Hostname of an Origin/Referer URL (keeps IPv6 brackets), or null if unparseable. */
+function originHostname(value: string): string | null {
+  try {
+    return new URL(value).hostname
+  } catch {
+    return null
+  }
+}
+
+/**
+ * Reject browser-origin attacks against the no-auth localhost API:
+ *  - **DNS rebinding** (read exfiltration): a page that rebinds its own hostname to
+ *    127.0.0.1 still sends `Host: attacker.com`, so requiring a loopback Host blocks it.
+ *  - **CSRF** (blind writes): a cross-site fetch — including the `text/plain` "simple
+ *    request" that needs no preflight — always carries a non-loopback `Origin`, so
+ *    requiring a loopback Origin/Referer on unsafe methods blocks store poisoning.
+ * Same-origin SPA traffic (Host/Origin = 127.0.0.1:<port>) and native clients with no
+ * Origin pass through. Applied before every route.
+ */
+const localOnlyGuard: MiddlewareHandler = async (c, next) => {
+  const host = c.req.header('host')
+  if (host && !LOOPBACK_HOSTS.has(hostWithoutPort(host))) {
+    return c.json({ error: 'forbidden host' }, 403)
+  }
+  if (UNSAFE_METHODS.has(c.req.method)) {
+    const originRaw = c.req.header('origin') ?? c.req.header('referer')
+    if (originRaw) {
+      const oh = originHostname(originRaw)
+      if (!oh || !LOOPBACK_HOSTS.has(oh)) {
+        return c.json({ error: 'cross-origin request forbidden' }, 403)
+      }
+    }
+  }
+  await next()
+}
+
 /**
  * The Studio HTTP surface as a pure Hono app: a same-origin JSON API (mounted from
  * the focused route modules in ./routes) plus the static SPA with history fallback.
@@ -39,6 +90,21 @@ export interface StudioAppOpts {
 export function buildStudioApp(provider: StoreProvider, opts: StudioAppOpts): Hono {
   const app = new Hono()
   const root = opts.staticDir
+
+  // Block DNS-rebinding reads + CSRF writes before anything else (see localOnlyGuard).
+  app.use('*', localOnlyGuard)
+
+  // Bracket data requests so a project switch quiesces before closing the old store. The
+  // switch/sync routes (/api/project*) are excluded — counting them would deadlock the drain.
+  app.use('/api/*', async (c, next) => {
+    if (c.req.path.startsWith('/api/project')) return next()
+    provider.enter()
+    try {
+      await next()
+    } finally {
+      provider.leave()
+    }
+  })
 
   // --- read/write JSON API (same-origin) ---
   app.route('/api', healthRoutes())
@@ -52,7 +118,13 @@ export function buildStudioApp(provider: StoreProvider, opts: StudioAppOpts): Ho
 
   // --- static SPA with history fallback for client-side routes ---
   app.get('*', async (c) => {
-    const hit = await tryFile(root, decodeURIComponent(c.req.path))
+    let urlPath: string
+    try {
+      urlPath = decodeURIComponent(c.req.path)
+    } catch {
+      return c.text('bad request', 400) // malformed percent-encoding — don't 500
+    }
+    const hit = await tryFile(root, urlPath)
     if (hit) return c.body(hit.data, 200, { 'Content-Type': hit.type })
     const index = await tryFile(root, '/index.html')
     if (index) return c.body(index.data, 200, { 'Content-Type': index.type })

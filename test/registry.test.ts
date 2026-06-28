@@ -97,6 +97,22 @@ describe('project registry', () => {
     delete process.env.BCTX_TOKEN_WORK
   })
 
+  it('refuses an ambiguous env override for names with . or - (no wrong-token leak)', () => {
+    addProject('a-b', { mode: 'replica', file: 'p.db', syncUrl: 'libsql://x', createdAt: 'x' })
+    setToken('a-b', 'stored')
+    // "a-b" would collapse to BCTX_TOKEN_A_B and could collide with a different project, so
+    // the env override is not honored — the unambiguous stored credential wins.
+    process.env.BCTX_TOKEN_A_B = 'collides'
+    expect(resolveToken('a-b')).toBe('stored')
+    delete process.env.BCTX_TOKEN_A_B
+  })
+
+  it('writes config.json 0600 and keeps the home dir 0700', () => {
+    addProject('work', { mode: 'local', file: 'projects/work.db', createdAt: 'x' })
+    expect(statSync(join(home, 'config.json')).mode & 0o777).toBe(0o600)
+    expect(statSync(home).mode & 0o777).toBe(0o700)
+  })
+
   it('resolveTarget precedence: --db > --project > BCTX_PROJECT > default', () => {
     addProject('work', { mode: 'local', file: 'projects/work.db', createdAt: 'x' })
     expect(resolveTarget({ db: '/tmp/x.db' })).toEqual({ mode: 'local', file: '/tmp/x.db' })

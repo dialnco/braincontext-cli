@@ -1,8 +1,8 @@
 import { readdirSync, readFileSync } from 'node:fs'
 import { basename, join } from 'node:path'
 import type { Kysely } from 'kysely'
-import { type Database, PAGE_TYPES, type PageType } from '../core/types'
-import { createPage, getPageBySlug, recordSource, updatePage } from '../core/wiki'
+import { type Database, LINK_TYPES, PAGE_TYPES, type PageType } from '../core/types'
+import { addLink, createPage, getPageBySlug, recordSource, updatePage } from '../core/wiki'
 import { parseFrontmatter } from '../lib/frontmatter'
 
 const MDLINK = /\[([^\]]*)\]\(([^)]+)\.md\)/g
@@ -17,6 +17,25 @@ function str(v: unknown): string | undefined {
 }
 function strArray(v: unknown): string[] {
   return Array.isArray(v) ? v.filter((t): t is string => typeof t === 'string') : []
+}
+
+interface FmLink {
+  type: string
+  toSlug?: string
+  toTitle?: string
+}
+/** Parse the `links:` frontmatter array (explicit typed edges) written by export. */
+function asLinks(v: unknown): FmLink[] {
+  if (!Array.isArray(v)) return []
+  const out: FmLink[] = []
+  for (const it of v) {
+    if (!it || typeof it !== 'object') continue
+    const o = it as Record<string, unknown>
+    const type = str(o.type)
+    if (!type || !(LINK_TYPES as readonly string[]).includes(type)) continue
+    out.push({ type, toSlug: str(o.toSlug), toTitle: str(o.toTitle) })
+  }
+  return out
 }
 
 export interface ImportResult {
@@ -69,6 +88,7 @@ export async function importWiki(db: Kysely<Database>, dir: string): Promise<Imp
 
   let created = 0
   let updated = 0
+  const idBySlug = new Map<string, string>()
 
   for (const p of parsed) {
     const body = rewrite(p.body)
@@ -88,12 +108,20 @@ export async function importWiki(db: Kysely<Database>, dir: string): Promise<Imp
         addTags: tags.filter((t) => !existing.tags.includes(t)),
         removeTags: existing.tags.filter((t) => !tags.includes(t)),
       })
+      idBySlug.set(p.slug, existing.id)
       updated++
     } else if (p.type === 'source') {
-      await recordSource(db, { title: p.title, body, uri: str(p.data.uri), createdAt, updatedAt })
+      const src = await recordSource(db, {
+        title: p.title,
+        body,
+        uri: str(p.data.uri),
+        createdAt,
+        updatedAt,
+      })
+      idBySlug.set(p.slug, src.id)
       created++
     } else {
-      await createPage(db, {
+      const page = await createPage(db, {
         title: p.title,
         pageType: p.type,
         body,
@@ -103,7 +131,20 @@ export async function importWiki(db: Kysely<Database>, dir: string): Promise<Imp
         createdAt,
         updatedAt,
       })
+      idBySlug.set(p.slug, page.id)
       created++
+    }
+  }
+
+  // Second pass: recreate explicit typed links now that every page exists (and has an id).
+  // `references` edges already re-derived from the rewritten body above, so skip those.
+  for (const p of parsed) {
+    const fromId = idBySlug.get(p.slug)
+    if (!fromId) continue
+    for (const link of asLinks(p.data.links)) {
+      const toId = link.toSlug ? idBySlug.get(link.toSlug) : undefined
+      if (toId) await addLink(db, fromId, { toId, type: link.type })
+      else if (link.toTitle) await addLink(db, fromId, { toTitle: link.toTitle, type: link.type })
     }
   }
 

@@ -1,6 +1,6 @@
 {
   "name": "braincontext-cli",
-  "version": "0.1.0",
+  "version": "0.6.0",
   "description": "Local-first SQLite CLI for saving and retrieving shared context across AI coding agents (Claude, Codex, Cursor, ...).",
   "type": "module",
   "license": "MIT",
@@ -32,7 +32,7 @@
     "lint": "biome check .",
     "format": "biome format --write .",
     "test": "vitest run",
-    "prepublishOnly": "pnpm run typecheck && pnpm run build && npx publint"
+    "prepublishOnly": "npm run typecheck && npm run typecheck:studio && npm run lint && npm run test && npm run build && npx publint"
   },
   "dependencies": {
     "@hono/node-server": "^2.0.6",

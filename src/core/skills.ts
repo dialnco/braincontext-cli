@@ -1,6 +1,6 @@
 import type { Kysely } from 'kysely'
 import { ulid } from 'ulidx'
-import { type Context, getContext, listContexts } from './contexts'
+import { type Context, deleteContextChildren, getContext, listContexts } from './contexts'
 import { withWriteRetry } from './tx'
 import type { Database } from './types'
 
@@ -69,7 +69,10 @@ export async function importSkill(db: Kysely<Database>, input: ImportSkillInput)
           changed_at: ts,
         })
         .execute()
-      await trx.deleteFrom('contexts').where('id', '=', row.id).execute() // cascades skill_files
+      // Explicitly remove sidecars: ON DELETE CASCADE does not fire inside a libSQL
+      // write txn (foreign_keys pragma doesn't survive the per-transaction reconnect).
+      await deleteContextChildren(trx, row.id)
+      await trx.deleteFrom('contexts').where('id', '=', row.id).execute()
     }
 
     await trx
@@ -136,16 +139,35 @@ export async function importSkill(db: Kysely<Database>, input: ImportSkillInput)
   }
 }
 
-/** Load a stored skill bundle (context + sidecar files) by skill name. */
-export async function loadSkill(db: Kysely<Database>, name: string): Promise<LoadedSkill | null> {
-  const row = await db
+/**
+ * Load a stored skill bundle (context + sidecar files) by name. `import` keys skills on
+ * (name, namespace), so loading must respect namespace too: with an explicit `namespace`
+ * we filter to it; without one, a name living in several namespaces is ambiguous and throws
+ * (rather than silently exporting an arbitrary bundle).
+ */
+export async function loadSkill(
+  db: Kysely<Database>,
+  name: string,
+  namespace?: string,
+): Promise<LoadedSkill | null> {
+  let q = db
     .selectFrom('contexts')
-    .select('id')
+    .select(['id', 'namespace'])
     .where('kind', '=', 'skill')
     .where('title', '=', name)
     .where('deleted_at', 'is', null)
-    .orderBy('id', 'desc')
-    .executeTakeFirst()
+  if (namespace !== undefined) q = q.where('namespace', '=', namespace)
+  const rows = await q.orderBy('id', 'desc').execute()
+  if (rows.length === 0) return null
+  if (namespace === undefined) {
+    const namespaces = [...new Set(rows.map((r) => r.namespace))]
+    if (namespaces.length > 1) {
+      throw new Error(
+        `Skill "${name}" exists in multiple namespaces (${namespaces.join(', ')}). Pass --namespace to disambiguate.`,
+      )
+    }
+  }
+  const row = rows[0]
   if (!row) return null
 
   const ctx = await getContext(db, row.id)

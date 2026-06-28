@@ -163,7 +163,7 @@ data/taxonomy changed. localhost-only, no auth (writes go through `core/`).
 
 ## Notes / decisions
 
-- **Driver:** better-sqlite3 over `node:sqlite` because the latter is still experimental on Node 22–24 and lacks migration-tool support; revisit on Node 26.
+- **Driver:** **libSQL** (`@libsql/client`) since **v4** — one URL-driven driver covers local files, embedded replicas, and remote primaries, so "go online" is a config change, not a rewrite. (v1–v3 used **better-sqlite3**; `node:sqlite` was skipped as still-experimental on Node 22–24 with no migration-tool support — revisit on Node 26.)
 - **Query layer:** Kysely (zero-dep, whole-query type-safety, built-in migration runner) over Drizzle for a barebones tool.
 - **Concurrency:** WAL mode + short transactions + history/soft-delete make multi-agent writes recoverable.
 - **Anti-drift rule:** every surface calls `core/`, never raw SQL. (MCP, export, and skill bundles all go through `core/`.)
@@ -172,3 +172,123 @@ data/taxonomy changed. localhost-only, no auth (writes go through `core/`).
 - **Skill storage:** `skill_files.content` is BLOB + `is_executable` so binary `assets/` round-trip and `scripts/` stay executable. Full frontmatter stored losslessly in the context's `metadata` JSON.
 - **Greenfield migrations:** no incremental/back-compat migrations — the full schema lives in one base `0001_init`; schema changes re-baseline (reset the DB). This collapsed the planned `0003_wiki` ADD-COLUMN/rollback work.
 - **Wiki = no embeddings:** retrieval is FTS5/BM25 + the typed `links` graph (the graph *is* the knowledge graph). Pages reuse `contexts` (FTS/history/MCP/export for free); `page_type` is the wiki marker, orthogonal to `kind`, default-excluded so legacy surfaces never regress. Sources (`page_type='source'`) are immutable. `[[Title]]` resolves case-insensitively to non-deleted pages; unresolved → wanted (lint) link. Lint joins `deleted_at IS NULL` on both endpoints and ignores edges from `index` pages.
+
+## v6 — Hardening & adoption (P0–P3 shipped)
+
+A second multi-agent **double-check** after v5 (an 11-dimension fan-out, **73 agents**, every
+finding independently adversarially verified — refuted/duplicate dropped) surfaced **62
+findings: 0 critical, 8 high, 26 medium, 27 low**. The core is sound (per-instance write
+serialization, IMMEDIATE-txn read-modify-write, correct FTS triggers, real path-traversal
+guards, 0600 credentials, anti-drift through `core/`). The weaknesses cluster in the
+unauthenticated **Studio HTTP surface**, a handful of **data-loss edges**, the
+**retrieval/adoption loop** that makes context actually compound, and **doc drift**. This
+milestone now ships **all P0, P1, P2, and P3** below (each behavioural fix with a regression
+test). Full gate green — **104 tests** across 21 files — verified on the real binary
+(`init`/`add`/`export`/`update`/`wiki`/`status`/`export --watch`) and a live Studio server
+(percent-malformed path → 400, cross-origin POST + rebind Host → 403). Version bumped to
+**0.6.0**; CI added. Two items are intentionally **not** shipped and remain backlog: the
+namespace-default-to-project taxonomy change (semantic, needs design) and jsdom client-side
+React-hook tests (the data-loss-critical round-trip is covered server-side instead).
+
+### Known correctness bug (root-caused; fixed in v6 P0)
+
+- **`ON DELETE CASCADE` silently never fires.** `prepare()` sets `PRAGMA foreign_keys = ON`
+  on the main connection only, but libSQL's sqlite3 client drops/reopens its connection per
+  `transaction()` (the same reason `busy_timeout` had to move to the client `Config`, see
+  `db.ts:24-29`). So inside any write transaction `foreign_keys` is OFF and cascades don't
+  run — `skills.ts` re-import (`// cascades skill_files`) orphans the prior bundle's
+  `skill_files` BLOBs. Fix: never rely on CASCADE in app code; delete sidecars explicitly
+  inside the txn (audit `links`/`context_tags` too).
+
+### P0 — Security & data-loss (shipped)
+
+- [x] **Studio CSRF / DNS-rebinding:** the no-auth localhost read/write API had no
+  `Host`/`Origin` validation → a visited web page could CSRF-write (Hono parses any
+  content-type, so a `text/plain` simple-request POST needs no preflight) or DNS-rebind to
+  read the store; injected contexts later flow into `AGENTS.md`/`CLAUDE.md` =
+  prompt-injection. Added a `Host`+`Origin` allowlist middleware (`src/studio/server.ts`),
+  regression-tested (`test/studio-api.test.ts`) + verified on a live server (403 on
+  cross-origin POST + rebind Host).
+- [x] **`wiki export <dir>` deleted unrelated `.md`** in the target dir — deletes are now
+  scoped to tool-written files (wiki `slug`+`type` frontmatter); hand-authored markdown
+  (README/AGENTS.md) is never touched (`src/wiki/export.ts`).
+- [x] **`import --prune` deleted contexts whose file failed to parse** — now refuses to prune
+  when any file is unparseable (`src/sync/import.ts`).
+- [x] **CASCADE orphan bug** (above) — explicit child-row deletes via a shared
+  `deleteContextChildren` (`src/core/contexts.ts`), used by `skills.ts` re-import and hard
+  delete; test asserts 0 orphaned `skill_files`.
+- [x] **Studio editor data-loss windows** — `beforeunload` now prompts on dirty + best-effort
+  saves; the editor flushes on blur and on project-switch (registered via the store's
+  `registerFlush`) (`studio/src/state/useAutosave.ts`, `StoreContext.tsx`, `WikiView.tsx`).
+- [x] **Leaked Turso token** — `test-config.md` gitignored, creds env-only; token rotation is
+  a manual Turso-dashboard action.
+
+### P1 — Close the compounding loop (shipped)
+
+- [x] **`wiki_update` MCP tool** (+`wiki_unlink`, `wiki_graph`) — an MCP-only agent can now
+  edit a page in place instead of spawning duplicate-titled pages; tool descriptions +
+  ingest checklist nudge update-over-create (`src/mcp/wiki-tools.ts`).
+- [x] **Agent self-onboarding preamble** — `export` always emits a managed AGENTS.md preamble
+  ("retrieve before acting; save durable facts after; MCP available") even for an empty
+  store; `init` prints the next-step hint (`src/export/render.ts`, `src/commands/init.ts`).
+- [x] **`bctx status`/`doctor`** — single orient-me command: store/project/mode/location,
+  counts by kind/type, links, tags, and AGENTS.md staleness (`src/commands/status.ts`).
+- [x] **Env-derived `--agent`** — auto-attribute from agent env vars (or `BCTX_AGENT`) else
+  `user@host`, threaded through `add` + `wiki` writes (`src/lib/agent.ts`).
+
+### P2 — Correctness & UX edges (shipped)
+
+- [x] `searchContexts` swallowed **all** errors as empty — now only FTS5 *syntax* errors are
+  caught (and the query is sanitized + retried); busy/locked/I-O/corruption re-throw so "no
+  matches" ≠ "search failed" (`src/core/contexts.ts`).
+- [x] Wiki `type` filter was applied after SQL `LIMIT` → truncated; `page_type` is now pushed
+  into the WHERE so `LIMIT` applies to already-filtered rows (`listPages`/`searchPages`).
+- [x] Managed-block **sentinel-in-body** corrupted `AGENTS.md` & broke idempotency — `BEGIN`/
+  `END` markers in rendered bodies are now neutralized with a zero-width char
+  (`src/export/managed.ts`).
+- [x] `export --targets store` never removed stale files → deleted contexts resurrected on
+  re-import; `pruneStaleStoreFiles` now removes scope-matching files whose `id` is no longer
+  live (id-less files like README/AGENTS.md are never touched) (`src/export/store.ts`).
+- [x] Wiki export/import **dropped the typed-link graph** (only body `[[links]]` survived) —
+  explicit links now serialize to frontmatter (`slug`/`title`) and re-create on import
+  (`src/wiki/export.ts`, `src/wiki/import.ts`).
+- [x] `update` can now change `kind`/`scope`/`namespace` (`--kind/--scope/--namespace`); on
+  `import`, divergence in those immutable fields surfaces a **skip warning** (with the
+  `bctx update` hint) instead of a silent "unchanged" (`src/commands/update.ts`,
+  `src/sync/import.ts`).
+- [x] Skill `loadSkill`/`skill export` now honor namespace; a bare name living in multiple
+  namespaces throws with the candidates instead of exporting an arbitrary bundle
+  (`src/core/skills.ts`, `src/commands/skill.ts`).
+- [x] Studio SPA: blank pane after project switch fixed (redirect to first live page); read
+  errors now surface an **error UI with Retry** instead of an empty state; hover-preview
+  DOM-XSS sink replaced with `DOMParser`/`textContent`; autosave serialized + `beforeunload`
+  guard (`studio/src/views/*`, `studio/src/state/*`, `studio/src/editor/WikiEditor.tsx`).
+- [ ] **Taxonomy overload:** defaulting `--namespace` to the current project — **deferred**
+  (semantic change; flagged to avoid a silent cross-project regression).
+
+### P3 — Tests, packaging, polish (shipped)
+
+- [x] New regression tests (104 total, +16): FTS sanitize, wiki type-pushdown-under-LIMIT,
+  `removeLink` count, `update` kind/scope/namespace, managed-sentinel idempotency, store
+  prune, wiki typed-link round-trip, frontmatter blank-line byte round-trip, registry
+  chmod + token-collision, skill-namespace disambiguation, `withFileLockSync` steal/release,
+  studio malformed-path 400. (jsdom client `useAutosave` + spawn CLI-smoke deferred — the
+  latter is covered by the real-binary e2e.)
+- [x] `config.json` now written `0600` and `~/.braincontext` kept `0700` (`registry.ts`).
+- [x] Project token env-var collision fixed: names with `.`/`-` (which collapse to `_`) get
+  **no** env override — credentials.json (keyed by exact name) is unambiguous (`registry.ts`).
+- [x] Registry read-modify-write now runs under a cross-process `withFileLockSync` (no lost
+  updates between concurrent `bctx project` commands) (`src/core/lock.ts`, `registry.ts`).
+- [x] Stdio MCP server now exits on client disconnect (stdin EOF) so an orphaned process can't
+  keep the embedded-replica write-lock (`src/mcp/run.ts`).
+- [x] CLI silent-success foot-guns fixed: `--set-meta` rejects malformed pairs; `export
+  --targets` errors on unknown names; `update` refuses an empty body (wipe guard); `wiki
+  unlink` reports `Unlinked (n)` / `No matching link to remove`.
+- [x] Wiki resource hides soft-deleted pages; frontmatter round-trips the blank line after the
+  block; studio wiki PATCH returns `409` only for the immutable-source conflict (else `500`);
+  studio project-switch drains in-flight requests before closing the old store.
+- [x] **`bctx export --watch`** — re-exports whenever the store changes (polls + replica
+  re-sync); exits promptly on Ctrl-C; closes the staleness loop (`src/commands/export.ts`).
+- [x] `prepublishOnly` now runs typecheck + studio typecheck + lint + test + build via `npm`
+  (not hardcoded `pnpm`); version → **0.6.0**; `.github/workflows/ci.yml` added.
+- [x] `README` v4→v5 + Studio section; `LICENSE` shipped; this `progress.md` refresh.

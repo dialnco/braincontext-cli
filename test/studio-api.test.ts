@@ -25,6 +25,48 @@ const json = (body: unknown) => ({
   body: JSON.stringify(body),
 })
 
+describe('studio security guard (CSRF / DNS-rebind)', () => {
+  it('blocks cross-origin writes but allows same-origin and native (no-origin) writes', async () => {
+    const app = await newApp()
+
+    // CSRF: a cross-site POST — including the text/plain "simple request" that skips the
+    // CORS preflight — must be refused, so a visited web page can't poison the store.
+    const evil = await app.request('/api/contexts', {
+      method: 'POST',
+      headers: { 'content-type': 'text/plain', origin: 'https://evil.example' },
+      body: JSON.stringify({ body: 'pwned', kind: 'rule' }),
+    })
+    expect(evil.status).toBe(403)
+
+    // Same-origin (the SPA itself) is allowed.
+    const sameOrigin = await app.request('/api/contexts', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', origin: 'http://127.0.0.1:8420' },
+      body: JSON.stringify({ body: 'legit', kind: 'rule' }),
+    })
+    expect(sameOrigin.status).toBe(201)
+
+    // A native client with no Origin header (e.g. curl on localhost) is allowed.
+    const noOrigin = await app.request('/api/contexts', json({ body: 'native', kind: 'note' }))
+    expect(noOrigin.status).toBe(201)
+  })
+
+  it('rejects a non-loopback Host header (DNS rebinding)', async () => {
+    const app = await newApp()
+    const rebind = await app.request('/api/contexts', {
+      method: 'GET',
+      headers: { host: 'attacker.example' },
+    })
+    expect(rebind.status).toBe(403)
+  })
+
+  it('returns 400 (not 500) for a malformed percent-encoded path', async () => {
+    const app = await newApp()
+    const res = await app.request('/%zz')
+    expect(res.status).toBe(400)
+  })
+})
+
 describe('studio contexts API', () => {
   it('does CRUD + search + history through the API', async () => {
     const app = await newApp()

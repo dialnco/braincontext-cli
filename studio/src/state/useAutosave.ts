@@ -20,6 +20,7 @@ export function useAutosave(save: (value: string) => Promise<void>, delayMs = 10
   const [status, setStatus] = useState<SaveStatus>('saved')
   const pending = useRef<string | null>(null)
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const inflight = useRef<Promise<void>>(Promise.resolve())
   const saveRef = useRef(save)
   saveRef.current = save
 
@@ -32,8 +33,12 @@ export function useAutosave(save: (value: string) => Promise<void>, delayMs = 10
       timer.current = null
     }
     setStatus('saving')
+    // Serialize saves: a flush during an in-flight save must not let an older PATCH land
+    // after a newer one (out-of-order write → stale body persisted). Chain on the prior save.
+    const run = inflight.current.then(() => saveRef.current(value))
+    inflight.current = run.catch(() => undefined)
     try {
-      await saveRef.current(value)
+      await run
       // Only return to 'saved' if nothing new was scheduled while we were saving.
       setStatus(pending.current === null ? 'saved' : 'dirty')
     } catch {
@@ -55,10 +60,17 @@ export function useAutosave(save: (value: string) => Promise<void>, delayMs = 10
     await doSave()
   }, [doSave])
 
-  // Flush on tab close / refresh.
+  // Flush on tab close / refresh. A fire-and-forget fetch is not awaited by the browser
+  // on unload, so ALSO trigger the native "unsaved changes" prompt whenever the buffer is
+  // dirty — that turns a silent loss into a user choice (stay → the in-flight save or the
+  // 10s timer persists it). Blur + navigate + project-switch flushes handle the common cases.
   useEffect(() => {
-    const onBeforeUnload = () => {
-      if (pending.current !== null) void doSave()
+    const onBeforeUnload = (e: BeforeUnloadEvent) => {
+      if (pending.current !== null) {
+        void doSave()
+        e.preventDefault()
+        e.returnValue = ''
+      }
     }
     window.addEventListener('beforeunload', onBeforeUnload)
     return () => window.removeEventListener('beforeunload', onBeforeUnload)

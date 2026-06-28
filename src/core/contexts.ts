@@ -56,6 +56,8 @@ export interface ListFilters {
    * so legacy surfaces (list/search/export/MCP) never see them.
    */
   pageScope?: 'context' | 'wiki' | 'all'
+  /** Restrict to a concrete wiki page_type (applied in SQL, so LIMIT sees filtered rows). */
+  pageType?: string
 }
 
 export interface UpdateInput {
@@ -65,6 +67,10 @@ export interface UpdateInput {
   removeTags?: string[]
   setMetadata?: Record<string, unknown>
   agentSource?: string | null
+  /** Re-home the entry's structural identity (only via an explicit `bctx update`). */
+  kind?: Kind
+  scope?: Scope
+  namespace?: string
 }
 
 function nowIso(): string {
@@ -200,6 +206,7 @@ export async function listContexts(
   const pageScope = filters.pageScope ?? 'context'
   if (pageScope === 'context') q = q.where('page_type', 'is', null)
   else if (pageScope === 'wiki') q = q.where('page_type', 'is not', null)
+  if (filters.pageType) q = q.where('page_type', '=', filters.pageType)
   if (filters.namespace) q = q.where('namespace', '=', filters.namespace)
   if (filters.kind) q = q.where('kind', '=', filters.kind)
   if (filters.scope) q = q.where('scope', '=', filters.scope)
@@ -244,6 +251,9 @@ export async function updateContext(
     if (patch.title !== undefined) update.title = patch.title
     if (patch.body !== undefined) update.body = patch.body
     if (patch.agentSource !== undefined) update.agent_source = patch.agentSource
+    if (patch.kind !== undefined) update.kind = patch.kind
+    if (patch.scope !== undefined) update.scope = patch.scope
+    if (patch.namespace !== undefined) update.namespace = patch.namespace
     if (patch.setMetadata) {
       update.metadata = JSON.stringify({
         ...parseMetadata(existing.metadata),
@@ -298,9 +308,30 @@ export async function updateContext(
       body: patch.body !== undefined ? patch.body : existing.body,
       agent_source: patch.agentSource !== undefined ? patch.agentSource : existing.agent_source,
       metadata: typeof update.metadata === 'string' ? update.metadata : existing.metadata,
+      kind: patch.kind ?? existing.kind,
+      scope: patch.scope ?? existing.scope,
+      namespace: patch.namespace ?? existing.namespace,
     }
     return toContext(resultRow, tags)
   })
+}
+
+/**
+ * Remove a context's child rows (tags, skill-file sidecars, graph edges) inside the
+ * caller's write transaction, as part of a HARD delete. We do NOT rely on
+ * `ON DELETE CASCADE`: libSQL opens a fresh connection per `transaction()`, so the
+ * `PRAGMA foreign_keys = ON` set once in `db.prepare()` does not survive into the write
+ * txn — and SQLite makes the pragma a no-op if re-issued inside an open transaction — so
+ * cascades silently never fire. `context_history` is intentionally NOT removed (the
+ * append-only audit survives a hard delete).
+ */
+export async function deleteContextChildren(trx: Kysely<Database>, id: string): Promise<void> {
+  await trx.deleteFrom('skill_files').where('context_id', '=', id).execute()
+  await trx.deleteFrom('context_tags').where('context_id', '=', id).execute()
+  await trx
+    .deleteFrom('links')
+    .where((eb) => eb.or([eb('from_id', '=', id), eb('to_id', '=', id)]))
+    .execute()
 }
 
 /**
@@ -334,6 +365,7 @@ export async function deleteContext(
       .execute()
 
     if (opts.hard) {
+      await deleteContextChildren(trx, id)
       await trx.deleteFrom('contexts').where('id', '=', id).execute()
     } else {
       await trx
@@ -406,6 +438,17 @@ function sanitizeFtsQuery(query: string): string {
   return tokens.map((t) => `"${t.replace(/"/g, '""')}"`).join(' ')
 }
 
+/**
+ * True only for an FTS5 *query-syntax* error (bad MATCH expression from user input) —
+ * NOT a real DB fault (busy/locked/I-O/corruption). Those must propagate so a caller can
+ * tell "no matches" from "search failed", instead of silently returning an empty list.
+ */
+function isFtsSyntaxError(e: unknown): boolean {
+  return /fts5:|unterminated string|malformed MATCH|no such column|unknown special query|syntax error/i.test(
+    String((e as Error)?.message ?? e),
+  )
+}
+
 export async function searchContexts(
   db: Kysely<Database>,
   query: string,
@@ -419,6 +462,7 @@ export async function searchContexts(
     const pageScope = filters.pageScope ?? 'context'
     if (pageScope === 'context') conditions.push(sql`c.page_type IS NULL`)
     else if (pageScope === 'wiki') conditions.push(sql`c.page_type IS NOT NULL`)
+    if (filters.pageType) conditions.push(sql`c.page_type = ${filters.pageType}`)
     if (filters.namespace) conditions.push(sql`c.namespace = ${filters.namespace}`)
     if (filters.kind) conditions.push(sql`c.kind = ${filters.kind}`)
     if (filters.scope) conditions.push(sql`c.scope = ${filters.scope}`)
@@ -443,17 +487,16 @@ export async function searchContexts(
     return result.rows
   }
 
-  // Try the query as written (supports FTS5 operators); on a syntax error fall
-  // back to a sanitized term-quoted query so ordinary input ("C++", "a:b") works.
+  // Try the query as written (supports FTS5 operators); on an FTS5 *syntax* error fall
+  // back to a sanitized term-quoted query so ordinary input ("C++", "a:b") works. A real
+  // DB fault (busy/locked/I-O/corruption) is re-thrown — never masked as "no results".
   let rows: ContextRow[]
   try {
     rows = await run(query)
-  } catch {
-    try {
-      rows = await run(sanitizeFtsQuery(query))
-    } catch {
-      return []
-    }
+  } catch (e) {
+    if (!isFtsSyntaxError(e)) throw e
+    // The sanitized query is a valid MATCH expression, so any error here is a real fault.
+    rows = await run(sanitizeFtsQuery(query))
   }
 
   const tagMap = await tagsByContext(

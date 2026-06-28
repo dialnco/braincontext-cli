@@ -13,7 +13,10 @@ import {
   listPages,
   outboundLinks,
   recordSource,
+  removeLink,
   searchPages,
+  updatePage,
+  wikiGraph,
 } from '../core/wiki'
 
 function ok(value: unknown) {
@@ -33,7 +36,7 @@ export function registerWikiTools(server: McpServer, db: Kysely<Database>): void
     {
       title: 'Search wiki',
       description:
-        'Full-text search (FTS5/BM25) across wiki pages. After synthesizing a worthwhile answer, file it back with wiki_new {type:"analysis"} so the exploration compounds.',
+        'Full-text search (FTS5/BM25) across wiki pages. After synthesizing a worthwhile answer, file it back so the exploration compounds: prefer wiki_update on the most relevant existing page, or wiki_new {type:"analysis"} when there is no home for it yet.',
       inputSchema: {
         query: z.string(),
         type: z.enum(AUTHORED_PAGE_TYPES).optional(),
@@ -84,6 +87,40 @@ export function registerWikiTools(server: McpServer, db: Kysely<Database>): void
   )
 
   server.registerTool(
+    'wiki_update',
+    {
+      title: 'Update wiki page',
+      description:
+        'Edit an existing wiki page (by id or title): body, title, tags. Re-syncs [[links]] from the new body. PREFER this over wiki_new when knowledge already has a home — refine the existing page so the wiki compounds instead of accumulating duplicate-titled pages. Source pages are immutable (use wiki_ingest for new sources).',
+      inputSchema: {
+        ref: z.string().describe('page id or title'),
+        title: z.string().optional(),
+        body: z.string().optional(),
+        addTags: z.array(z.string()).optional(),
+        removeTags: z.array(z.string()).optional(),
+        agent: z.string().optional(),
+      },
+    },
+    async ({ ref, title, body, addTags, removeTags, agent }) => {
+      const page = await resolveRef(db, ref)
+      if (!page) return fail(`No wiki page matching "${ref}"`)
+      try {
+        const updated = await updatePage(db, page.id, {
+          title,
+          body,
+          addTags,
+          removeTags,
+          agentSource: agent,
+        })
+        return updated ? ok(updated) : fail(`No wiki page matching "${ref}"`)
+      } catch (e) {
+        // updatePage throws on source pages ('source pages are immutable').
+        return fail((e as Error).message)
+      }
+    },
+  )
+
+  server.registerTool(
     'wiki_link',
     {
       title: 'Link wiki pages',
@@ -101,6 +138,27 @@ export function registerWikiTools(server: McpServer, db: Kysely<Database>): void
       const t = await resolveRef(db, to)
       await addLink(db, f.id, t ? { toId: t.id, type } : { toTitle: to, type })
       return ok({ from: f.id, to: t?.id ?? null, toTitle: t ? null : to, type, wanted: !t })
+    },
+  )
+
+  server.registerTool(
+    'wiki_unlink',
+    {
+      title: 'Unlink wiki pages',
+      description:
+        'Remove a typed link from a source page to a target (by id or title). Omit `type` to remove links of any type to that target.',
+      inputSchema: {
+        from: z.string().describe('source page id or title'),
+        to: z.string().describe('target page id or title'),
+        type: z.enum(LINK_TYPES).optional(),
+      },
+    },
+    async ({ from, to, type }) => {
+      const f = await resolveRef(db, from)
+      if (!f) return fail(`No source page matching "${from}"`)
+      const t = await resolveRef(db, to)
+      await removeLink(db, f.id, t ? { toId: t.id, type } : { toTitle: to, type })
+      return ok({ from: f.id, to: t?.id ?? null, toTitle: t ? null : to, type: type ?? null })
     },
   )
 
@@ -126,7 +184,7 @@ export function registerWikiTools(server: McpServer, db: Kysely<Database>): void
         checklist: [
           'Write a summary page: wiki_new {type:"summary"}',
           'Link summary→source: wiki_link {type:"source"}',
-          'Update ~5–15 related entity/concept pages, weaving in [[links]]; reconcile any contradictions',
+          'Update ~5–15 related entity/concept pages with wiki_update (edit in place — do NOT create duplicates), weaving in [[links]]; reconcile any contradictions',
           'Refresh the catalog so it reflects the new/updated pages (bctx wiki index --out index.md)',
           'Run wiki_lint to check health (orphans, dangling/wanted links, contradictions, data gaps)',
         ],
@@ -143,6 +201,17 @@ export function registerWikiTools(server: McpServer, db: Kysely<Database>): void
       inputSchema: {},
     },
     async () => ok(await lint(db)),
+  )
+
+  server.registerTool(
+    'wiki_graph',
+    {
+      title: 'Wiki graph',
+      description:
+        'Return the wiki link graph — pages (nodes, with degree) and their typed edges — for navigation and overview. Optionally scope to a namespace.',
+      inputSchema: { namespace: z.string().optional() },
+    },
+    async ({ namespace }) => ok(await wikiGraph(db, { namespace })),
   )
 
   server.registerResource(
@@ -163,9 +232,11 @@ export function registerWikiTools(server: McpServer, db: Kysely<Database>): void
     { title: 'Wiki pages', description: 'Browse wiki pages as resources.' },
     async (uri, { id }) => {
       const page = await getPage(db, String(id))
+      // Hide soft-deleted pages, consistent with the context resource.
+      const visible = page && page.deletedAt === null ? page : null
       return {
         contents: [
-          { uri: uri.href, mimeType: 'application/json', text: JSON.stringify(page, null, 2) },
+          { uri: uri.href, mimeType: 'application/json', text: JSON.stringify(visible, null, 2) },
         ],
       }
     },

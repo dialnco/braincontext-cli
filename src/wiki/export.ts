@@ -1,10 +1,10 @@
-import { mkdirSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import type { Kysely } from 'kysely'
 import type { Context } from '../core/contexts'
-import type { Database } from '../core/types'
-import { listLog, listPages } from '../core/wiki'
-import { stringifyFrontmatter } from '../lib/frontmatter'
+import { type Database, REFERENCES_LINK } from '../core/types'
+import { listLog, listPages, outboundLinks } from '../core/wiki'
+import { parseFrontmatter, stringifyFrontmatter } from '../lib/frontmatter'
 import { normalizeTitle } from '../lib/wikilinks'
 
 const WIKILINK = /\[\[([^\]]+)\]\]/g
@@ -54,8 +54,10 @@ export async function exportWiki(db: Kysely<Database>, outDir: string): Promise<
   const pages = await listPages(db, { limit: 100000 })
 
   const slugByTitle = new Map<string, string>()
+  const slugById = new Map<string, string>()
   for (const p of pages) {
     if (p.title && p.slug) slugByTitle.set(normalizeTitle(p.title), p.slug)
+    if (p.slug) slugById.set(p.id, p.slug)
   }
 
   const files: string[] = []
@@ -68,6 +70,16 @@ export async function exportWiki(db: Kysely<Database>, outDir: string): Promise<
     }
     if (p.tags.length > 0) fm.tags = p.tags
     if (typeof p.metadata.uri === 'string') fm.uri = p.metadata.uri
+    // Serialize EXPLICIT typed links (source/relates/supersedes/...). `references` links
+    // re-derive from the body `[[..]]` on import, so they are excluded to avoid duplication.
+    const links: Array<{ type: string; toSlug?: string; toTitle?: string }> = []
+    for (const l of await outboundLinks(db, p.id)) {
+      if (l.type === REFERENCES_LINK) continue
+      const toSlug = l.pageId ? slugById.get(l.pageId) : undefined
+      if (toSlug) links.push({ type: l.type, toSlug })
+      else if (l.title) links.push({ type: l.type, toTitle: l.title })
+    }
+    if (links.length > 0) fm.links = links
     fm.created = p.createdAt
     fm.updated = p.updatedAt
 
@@ -94,12 +106,27 @@ export async function exportWiki(db: Kysely<Database>, outDir: string): Promise<
   writeFileSync(join(outDir, 'log.md'), `${logLines.join('\n').trim()}\n`, 'utf8')
   files.push('log.md')
 
-  // The export dir is a full materialization of the wiki: remove stale .md files
-  // for pages that no longer exist, so a deleted page can't resurrect on re-import.
+  // The export dir is a full materialization of the wiki: remove stale .md files for
+  // pages that no longer exist, so a deleted page can't resurrect on re-import. CRUCIAL
+  // safety: only remove files THIS exporter produced — a wiki page file always carries
+  // `slug` + `type` frontmatter, and index.md/log.md are always rewritten (in `keep`).
+  // Hand-authored markdown in the target dir (README.md, AGENTS.md, notes) has no such
+  // frontmatter and is never touched, so `bctx wiki export .` can't nuke unrelated files.
   const keep = new Set(files)
   for (const existing of readdirSync(outDir)) {
-    if (existing.endsWith('.md') && !keep.has(existing)) rmSync(join(outDir, existing))
+    if (!existing.endsWith('.md') || keep.has(existing)) continue
+    if (isStaleWikiPageFile(join(outDir, existing))) rmSync(join(outDir, existing))
   }
 
   return { files }
+}
+
+/** True only for a leftover file a prior wiki export wrote (page frontmatter: slug + type). */
+function isStaleWikiPageFile(path: string): boolean {
+  try {
+    const { data } = parseFrontmatter<Record<string, unknown>>(readFileSync(path, 'utf8'))
+    return typeof data.slug === 'string' && typeof data.type === 'string'
+  } catch {
+    return false
+  }
 }

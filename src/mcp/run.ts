@@ -33,6 +33,10 @@ export async function runMcpStdio(opts: DbOpts): Promise<void> {
   }
   process.on('SIGINT', shutdown)
   process.on('SIGTERM', shutdown)
+  // Exit when the client disconnects (stdin EOF) — otherwise an orphaned server keeps the
+  // embedded-replica write-lock and blocks the next session. shutdown() is idempotent.
+  process.stdin.on('end', () => void shutdown())
+  process.stdin.on('close', () => void shutdown())
 
   // stderr only — a single stray stdout write corrupts the JSON-RPC stream.
   const label = target.mode === 'remote' ? target.url : target.file

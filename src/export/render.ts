@@ -14,9 +14,24 @@ function renderEntry(c: Context): string {
   return `- ${title}${c.body.trim()}${tags}`
 }
 
-/** Markdown that goes INSIDE the AGENTS.md managed fence (sections by kind). */
+/**
+ * A short, always-emitted preamble so a fresh agent discovers the store and the
+ * retrieve-then-save habit even when no items are stored yet (the managed block is
+ * otherwise empty — agents would have no signal the store exists). Self-onboarding is
+ * what makes context actually *compound* instead of being re-learned every session.
+ */
+const AGENTS_PREAMBLE = `## braincontext
+
+This repo has a **braincontext** store (\`bctx\`) — durable, shared context for AI agents.
+Use it so knowledge compounds instead of being re-learned each session:
+
+- **Retrieve first** (before answering): \`bctx wiki search "<topic>"\` · \`bctx search "<topic>"\` — MCP: \`wiki_search\`, \`search_contexts\`.
+- **Save durable facts** (rules, decisions, gotchas): \`bctx wiki new\`/\`bctx wiki update\` for linked knowledge, or \`bctx add --kind rule|decision|note\`.
+- **Native access:** run \`bctx mcp\` · playbook: \`bctx skills get braincontext\`.`
+
+/** Markdown that goes INSIDE the AGENTS.md managed fence (preamble + sections by kind). */
 export function renderAgentsBody(items: Context[]): string {
-  const lines: string[] = []
+  const lines: string[] = [AGENTS_PREAMBLE, '']
   for (const { kind, heading } of KIND_SECTIONS) {
     const group = items.filter((c) => c.kind === kind)
     if (group.length === 0) continue

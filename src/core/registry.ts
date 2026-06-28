@@ -2,6 +2,7 @@ import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSy
 import { homedir } from 'node:os'
 import { isAbsolute, join } from 'node:path'
 import type { DbTarget } from './db'
+import { withFileLockSync } from './lock'
 
 /** Write atomically (temp file + rename) so a concurrent reader/crash never sees a
  * half-written or truncated registry file. */
@@ -16,6 +17,18 @@ function atomicWrite(path: string, data: string, mode?: number): void {
       // best-effort on platforms without POSIX perms
     }
   }
+}
+
+/** Create the home dir owner-only (0700) — it holds store files, config, and remote URLs. */
+function ensureHome(): string {
+  const dir = homeDir()
+  mkdirSync(dir, { recursive: true, mode: 0o700 })
+  try {
+    chmodSync(dir, 0o700) // tighten even if it pre-existed with looser perms
+  } catch {
+    // best-effort on platforms without POSIX perms
+  }
+  return dir
 }
 
 const HOME_DIR = '.braincontext'
@@ -104,8 +117,9 @@ export function readConfig(): Config {
 }
 
 export function writeConfig(cfg: Config): void {
-  mkdirSync(homeDir(), { recursive: true })
-  atomicWrite(configPath(), `${JSON.stringify(cfg, null, 2)}\n`)
+  ensureHome()
+  // 0600: config.json holds remote primary URLs (and project topology) — owner-only.
+  atomicWrite(configPath(), `${JSON.stringify(cfg, null, 2)}\n`, 0o600)
 }
 
 // ── Credentials (tokens) live apart from config.json, with 0600 perms ──────────
@@ -124,7 +138,7 @@ function readCredentials(): Credentials {
 }
 
 function writeCredentials(creds: Credentials): void {
-  mkdirSync(homeDir(), { recursive: true })
+  ensureHome()
   atomicWrite(credentialsPath(), `${JSON.stringify(creds, null, 2)}\n`, 0o600)
 }
 
@@ -136,13 +150,21 @@ export function setToken(name: string, token: string | null): void {
   writeCredentials(creds)
 }
 
-function tokenEnvKey(name: string): string {
-  return `BCTX_TOKEN_${name.toUpperCase().replace(/[^A-Z0-9]/g, '_')}`
+/**
+ * Env-var key for a project token, or null when the name can't map unambiguously. Env var
+ * names allow only `[A-Z0-9_]`, so a name with `.`/`-` would collapse to `_` and could
+ * collide with a *different* project (sending the wrong token to the wrong remote). For
+ * those, we expose no env override — credentials.json is keyed by the exact name.
+ */
+function tokenEnvKey(name: string): string | null {
+  return /^[A-Za-z0-9_]+$/.test(name) ? `BCTX_TOKEN_${name.toUpperCase()}` : null
 }
 
 /** Resolve a project's token: `BCTX_TOKEN_<NAME>` env wins, else credentials.json. */
 export function resolveToken(name: string): string | undefined {
-  return process.env[tokenEnvKey(name)] ?? readCredentials()[name]
+  const key = tokenEnvKey(name)
+  const fromEnv = key ? process.env[key] : undefined
+  return fromEnv ?? readCredentials()[name]
 }
 
 // ── Project CRUD ───────────────────────────────────────────────────────────────
@@ -170,11 +192,24 @@ export function currentProjectName(): string {
   return readConfig().currentProject
 }
 
+/** Read-modify-write the config under a cross-process lock so two concurrent `bctx project`
+ *  commands can't lose an update (atomic writes alone prevent torn files, not lost updates). */
+function mutateConfig(mutate: (cfg: Config) => void): void {
+  ensureHome()
+  withFileLockSync(join(homeDir(), 'config.lock'), () => {
+    const cfg = readConfig()
+    mutate(cfg)
+    writeConfig(cfg)
+  })
+}
+
 export function setCurrent(name: string): void {
-  const cfg = readConfig()
-  if (!cfg.projects[name]) throw new Error(`No such project: "${name}". Run \`bctx project list\`.`)
-  cfg.currentProject = name
-  writeConfig(cfg)
+  mutateConfig((cfg) => {
+    if (!cfg.projects[name]) {
+      throw new Error(`No such project: "${name}". Run \`bctx project list\`.`)
+    }
+    cfg.currentProject = name
+  })
 }
 
 export function addProject(
@@ -183,31 +218,34 @@ export function addProject(
   opts: { setCurrent?: boolean } = {},
 ): void {
   validateProjectName(name)
-  const cfg = readConfig()
-  if (cfg.projects[name]) throw new Error(`Project already exists: "${name}".`)
-  cfg.projects[name] = entry
-  if (opts.setCurrent) cfg.currentProject = name
-  writeConfig(cfg)
+  mutateConfig((cfg) => {
+    if (cfg.projects[name]) throw new Error(`Project already exists: "${name}".`)
+    cfg.projects[name] = entry
+    if (opts.setCurrent) cfg.currentProject = name
+  })
 }
 
 export function updateProject(name: string, patch: Partial<ProjectEntry>): void {
-  const cfg = readConfig()
-  const e = cfg.projects[name]
-  if (!e) throw new Error(`No such project: "${name}".`)
-  cfg.projects[name] = { ...e, ...patch }
-  writeConfig(cfg)
+  mutateConfig((cfg) => {
+    const e = cfg.projects[name]
+    if (!e) throw new Error(`No such project: "${name}".`)
+    cfg.projects[name] = { ...e, ...patch }
+  })
 }
 
 export function removeProject(name: string): ProjectEntry {
   if (name === DEFAULT_PROJECT) throw new Error(`Cannot remove the "${DEFAULT_PROJECT}" project.`)
-  const cfg = readConfig()
-  const e = cfg.projects[name]
-  if (!e) throw new Error(`No such project: "${name}".`)
-  delete cfg.projects[name]
-  if (cfg.currentProject === name) cfg.currentProject = DEFAULT_PROJECT
-  writeConfig(cfg)
+  let removed: ProjectEntry | undefined
+  mutateConfig((cfg) => {
+    const e = cfg.projects[name]
+    if (!e) throw new Error(`No such project: "${name}".`)
+    removed = e
+    delete cfg.projects[name]
+    if (cfg.currentProject === name) cfg.currentProject = DEFAULT_PROJECT
+  })
   setToken(name, null)
-  return e
+  // mutateConfig throws above if the project was missing, so `removed` is always set here.
+  return removed as ProjectEntry
 }
 
 /** Absolute local file path for a project entry (relative paths resolve under home). */

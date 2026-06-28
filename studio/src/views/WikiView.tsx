@@ -50,10 +50,13 @@ export function WikiView({ onNav }: { onNav: (v: 'wiki' | 'contexts') => void })
   const routeId = route.parts[0] === 'page' ? route.parts[1] : undefined
   const activeId = routeId ?? pages[0]?.id ?? null
 
-  // Default to the first page when at the wiki root. Guard against the `/contexts`
-  // route (where routeId is also undefined) so switching tabs doesn't bounce back here.
+  // Default to the first page when at the wiki root, OR when the routed id is gone (e.g.
+  // after a project switch the hash still points at the old project's page → blank pane).
+  // Guard against the `/contexts` route so switching tabs doesn't bounce back here.
   useEffect(() => {
-    if (!onContextsRoute && !routeId && pages[0]) route.navigate(pageHref(pages[0].id))
+    const first = pages[0]
+    if (onContextsRoute || !first) return
+    if (!routeId || !pages.some((p) => p.id === routeId)) route.navigate(pageHref(first.id))
   }, [onContextsRoute, routeId, pages, route])
 
   const detail = useAsync<Detail>(async () => {
@@ -79,6 +82,14 @@ export function WikiView({ onNav }: { onNav: (v: 'wiki' | 'contexts') => void })
     },
     [route],
   )
+
+  // A project switch swaps the live store under every handler and remounts the editor;
+  // register this editor's flush so switchProject persists pending edits first, no matter
+  // where the switch is triggered from (this view's switcher, the palette, etc.).
+  useEffect(() => {
+    app.registerFlush(() => editorRef.current?.flush() ?? Promise.resolve())
+    return () => app.registerFlush(null)
+  }, [app.registerFlush])
 
   const createPage = useCallback(
     async (title: string): Promise<Context | null> => {
@@ -270,6 +281,33 @@ export function WikiView({ onNav }: { onNav: (v: 'wiki' | 'contexts') => void })
                 onCreatePage={createPage}
                 handleRef={editorRef}
               />
+            </div>
+          ) : pagesState.error || detail.error ? (
+            <div
+              style={sx(
+                'flex:1;display:flex;flex-direction:column;gap:12px;align-items:center;justify-content:center;',
+              )}
+            >
+              <div
+                style={sx(
+                  "font:400 15px 'Spectral',serif;font-style:italic;color:#b4533f;max-width:420px;text-align:center;",
+                )}
+              >
+                {pagesState.error ?? detail.error}
+              </div>
+              <Hov
+                as="button"
+                base={sx(
+                  "font:500 12px 'IBM Plex Mono';color:var(--ink);background:transparent;border:1px solid var(--border);border-radius:7px;padding:5px 13px;cursor:pointer;",
+                )}
+                hover={sx('border-color:var(--accent-ink);')}
+                onClick={() => {
+                  pagesState.reload()
+                  detail.reload()
+                }}
+              >
+                Retry
+              </Hov>
             </div>
           ) : (
             <div

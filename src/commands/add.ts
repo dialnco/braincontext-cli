@@ -3,6 +3,7 @@ import { z } from 'zod'
 import { createContext } from '../core/contexts'
 import { withDb } from '../core/db'
 import { KINDS, SCOPES } from '../core/types'
+import { resolveAgent } from '../lib/agent'
 import { formatContext } from '../lib/format'
 import { resolveBody } from '../lib/stdin'
 import { dbOptsFrom, splitCsv } from './_shared'
@@ -16,7 +17,10 @@ export function addCommand(): Command {
     .option('--namespace <ns>', 'namespace / project bucket', 'global')
     .option('--scope <scope>', `scope: ${SCOPES.join(' | ')}`, 'project')
     .option('--tags <a,b,c>', 'comma-separated tags')
-    .option('--agent <name>', 'agent source label (claude, codex, cursor, ...)')
+    .option(
+      '--agent <name>',
+      'agent source label (default: detected agent or user@host; set BCTX_AGENT to override)',
+    )
     .option('--file <path>', 'read body from a file (use - for stdin)')
     .option('--json', 'output JSON')
     .action(async (bodyArgs: string[], opts, command: Command) => {
@@ -35,7 +39,7 @@ export function addCommand(): Command {
           kind,
           namespace: opts.namespace,
           scope,
-          agentSource: opts.agent ?? null,
+          agentSource: resolveAgent(opts.agent),
           tags: splitCsv(opts.tags),
         }),
       )

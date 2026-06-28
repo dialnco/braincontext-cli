@@ -13,6 +13,7 @@ import { rmCommand } from './commands/rm'
 import { searchCommand } from './commands/search'
 import { skillCommand } from './commands/skill'
 import { skillsCommand } from './commands/skills'
+import { statusCommand } from './commands/status'
 import { studioCommand } from './commands/studio'
 import { updateCommand } from './commands/update'
 import { wikiCommand } from './commands/wiki'
@@ -35,6 +36,8 @@ program
   .option('--no-sync', 'skip the online sync for this command (replica projects)')
 
 program.addCommand(initCommand())
+// Orient: where is the store, what's in it, are exports stale.
+program.addCommand(statusCommand())
 // Project & sync management.
 program.addCommand(projectCommand())
 // Preferred workflow first.

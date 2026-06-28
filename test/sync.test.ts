@@ -148,4 +148,21 @@ describe('store round-trip (manual markdown <-> db sync)', () => {
     rmSync(dir, { recursive: true, force: true })
     await db.destroy()
   })
+
+  it('--prune refuses when any file fails to parse (a present file is not a deletion)', async () => {
+    const db = await freshDb()
+    await createContext(db, { body: 'keep me', kind: 'note', title: 'Keep', namespace: 'proj' })
+    const dir = tmp()
+    runExport(await selectContexts(db, {}), { outDir: dir, targets: ['store'] })
+    writeExportManifest(dir, { namespace: 'proj' }) // scope known → isolate the parse-fail guard
+    // a present-but-malformed markdown file (invalid YAML frontmatter)
+    writeFileSync(join(dir, 'broken.md'), '---\nnot: [valid: yaml\n---\nbody')
+
+    await expect(applyImport(db, dir, { prune: true })).rejects.toThrow(/failed to parse/)
+    // the present-but-unreadable file did NOT cause a deletion
+    expect((await listContexts(db, { namespace: 'proj' })).length).toBe(1)
+
+    rmSync(dir, { recursive: true, force: true })
+    await db.destroy()
+  })
 })

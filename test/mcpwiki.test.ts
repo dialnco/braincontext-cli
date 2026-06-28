@@ -57,4 +57,40 @@ describe('mcp wiki tools', () => {
 
     await db.destroy()
   })
+
+  it('wiki_update/unlink/graph are registered; update edits in place and refuses source pages', async () => {
+    const db = await freshDb()
+    const client = await connect(db)
+
+    const names = (await client.listTools()).tools.map((t) => t.name)
+    for (const n of ['wiki_update', 'wiki_unlink', 'wiki_graph']) expect(names).toContain(n)
+
+    await client.callTool({
+      name: 'wiki_new',
+      arguments: { title: 'Gateway', type: 'entity', body: 'v1' },
+    })
+    const updated = payload(
+      await client.callTool({
+        name: 'wiki_update',
+        arguments: { ref: 'Gateway', body: 'v2 body' },
+      }),
+    )
+    expect(updated.body).toContain('v2 body')
+
+    // edit-in-place, not a duplicate: only one page matches
+    const hits = payload(await client.callTool({ name: 'wiki_search', arguments: { query: 'v2' } }))
+    expect(hits.length).toBe(1)
+
+    // source pages stay immutable through MCP too
+    const src = payload(
+      await client.callTool({ name: 'wiki_ingest', arguments: { source: 'raw', title: 'Src' } }),
+    )
+    const res = (await client.callTool({
+      name: 'wiki_update',
+      arguments: { ref: src.sourceId, body: 'nope' },
+    })) as { isError?: boolean }
+    expect(res.isError).toBe(true)
+
+    await db.destroy()
+  })
 })

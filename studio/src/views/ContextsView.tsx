@@ -1,4 +1,4 @@
-import { useCallback, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { contextsApi } from '../api/contexts'
 import { type Context, KINDS, type Kind, SCOPES, type Scope } from '../api/types'
 import { ConfirmDeleteDialog } from '../components/common/ConfirmDeleteDialog'
@@ -330,6 +330,32 @@ function ContextEditor({
       toast(e instanceof Error ? e.message : 'Save failed')
     }
   }, [title, tags, ctx.id, onSaved, toast])
+
+  // Title/tags persist on blur only — add an unload guard (prompt + best-effort save) so a
+  // close/refresh mid-edit isn't a silent loss, and register a flush so a project switch
+  // persists the body autosave + title/tags first. A ref keeps this effect run-once.
+  const { registerFlush } = useApp()
+  const metaRef = useRef({ title, tags, saveMeta, flush: autosave.flush })
+  metaRef.current = { title, tags, saveMeta, flush: autosave.flush }
+  useEffect(() => {
+    registerFlush(async () => {
+      await metaRef.current.flush()
+      await metaRef.current.saveMeta()
+    })
+    const onBeforeUnload = (e: BeforeUnloadEvent) => {
+      const m = metaRef.current
+      if (m.title !== savedRef.current.title || m.tags !== savedRef.current.tags) {
+        void m.saveMeta()
+        e.preventDefault()
+        e.returnValue = ''
+      }
+    }
+    window.addEventListener('beforeunload', onBeforeUnload)
+    return () => {
+      registerFlush(null)
+      window.removeEventListener('beforeunload', onBeforeUnload)
+    }
+  }, [registerFlush])
 
   return (
     <div style={sx('max-width:760px;margin:0 auto;padding:30px 48px 80px;')}>

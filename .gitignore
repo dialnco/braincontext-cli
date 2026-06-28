@@ -12,3 +12,6 @@ coverage/
 
 .env
 .env.local
+
+# local test credentials (Turso creds live in .env.local / env only — never commit)
+test-config.md

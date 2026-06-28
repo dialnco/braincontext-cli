@@ -85,6 +85,9 @@ async function resolveWantedLinks(
   })
 }
 
+/** Reserved: the wiki export writes these as the generated catalog/log, so no page may own them. */
+const RESERVED_SLUGS = new Set(['index', 'log'])
+
 /** A unique-among-pages slug derived from `base`. */
 async function uniqueSlug(db: Kysely<Database>, base: string): Promise<string> {
   const rows = await db
@@ -93,7 +96,8 @@ async function uniqueSlug(db: Kysely<Database>, base: string): Promise<string> {
     .where('slug', 'like', `${base}%`)
     .where('slug', 'is not', null)
     .execute()
-  const taken = new Set(rows.map((r) => r.slug))
+  const taken = new Set<string | null>(rows.map((r) => r.slug))
+  for (const r of RESERVED_SLUGS) taken.add(r)
   if (!taken.has(base)) return base
   let i = 2
   while (taken.has(`${base}-${i}`)) i++
@@ -227,12 +231,14 @@ export async function listPages(
   db: Kysely<Database>,
   opts: { pageType?: string; namespace?: string; limit?: number } = {},
 ): Promise<Context[]> {
-  const pages = await listContexts(db, {
+  // pageType is pushed into the SQL WHERE so LIMIT applies to already-filtered rows
+  // (a JS post-filter would silently truncate type-filtered results to < limit).
+  return listContexts(db, {
     pageScope: 'wiki',
+    pageType: opts.pageType,
     namespace: opts.namespace,
     limit: opts.limit ?? 500,
   })
-  return opts.pageType ? pages.filter((p) => p.pageType === opts.pageType) : pages
 }
 
 export async function searchPages(
@@ -240,12 +246,12 @@ export async function searchPages(
   query: string,
   opts: { namespace?: string; limit?: number; pageType?: string } = {},
 ): Promise<Context[]> {
-  const hits = await searchContexts(db, query, {
+  return searchContexts(db, query, {
     pageScope: 'wiki',
+    pageType: opts.pageType,
     namespace: opts.namespace,
     limit: opts.limit,
   })
-  return opts.pageType ? hits.filter((h) => h.pageType === opts.pageType) : hits
 }
 
 // ---------------------------------------------------------------------------
@@ -323,11 +329,12 @@ export async function addLink(
     .execute()
 }
 
+/** Remove matching link(s); returns how many edges were deleted (0 = nothing matched). */
 export async function removeLink(
   db: Kysely<Database>,
   fromId: string,
   input: { toId?: string; toTitle?: string; type?: string },
-): Promise<void> {
+): Promise<number> {
   let q = db.deleteFrom('links').where('from_id', '=', fromId)
   if (input.type) q = q.where('type', '=', input.type)
   if (input.toId) {
@@ -336,7 +343,8 @@ export async function removeLink(
     const matches = await pageMatchesByTitle(db, input.toTitle)
     q = matches[0] ? q.where('to_id', '=', matches[0].id) : q.where('to_title', '=', input.toTitle)
   }
-  await q.execute()
+  const res = await q.executeTakeFirst()
+  return Number(res?.numDeletedRows ?? 0n)
 }
 
 export async function outboundLinks(db: Kysely<Database>, id: string): Promise<LinkView[]> {

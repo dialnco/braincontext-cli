@@ -21,5 +21,9 @@ export function initCommand(): Command {
       const where = describeTarget(opts)
       await withDb(opts, async () => {})
       console.log(`Initialized braincontext store at ${where}`)
+      console.log(
+        'Next: `bctx export` writes an AGENTS.md/CLAUDE.md preamble so agents discover and use\n' +
+          '      the store; `bctx mcp` exposes it natively. See `bctx skills get braincontext`.',
+      )
     })
 }

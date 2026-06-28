@@ -1,5 +1,5 @@
 import type React from 'react'
-import { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react'
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react'
 import { ApiError } from '../api/client'
 import { projectsApi } from '../api/projects'
 import type { ProjectInfo, ProjectStatus } from '../api/types'
@@ -13,6 +13,11 @@ interface AppState {
   refreshProjects: () => Promise<void>
   switchProject: (name: string) => Promise<void>
   syncProject: () => Promise<void>
+  /**
+   * Register the active editor's autosave flush so {@link switchProject} can persist
+   * pending edits before the store swaps under it. Pass null on unmount.
+   */
+  registerFlush: (fn: (() => Promise<void>) | null) => void
   /** Global revision counter; components key data fetches on it to refetch after writes. */
   rev: number
   bump: () => void
@@ -43,6 +48,11 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
     })
   }, [])
 
+  const flushRef = useRef<(() => Promise<void>) | null>(null)
+  const registerFlush = useCallback((fn: (() => Promise<void>) | null) => {
+    flushRef.current = fn
+  }, [])
+
   const bump = useCallback(() => setRev((r) => r + 1), [])
   const toast = useCallback((message: string) => {
     setToastMsg(message)
@@ -61,6 +71,13 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
 
   const switchProject = useCallback(
     async (name: string) => {
+      // Persist any pending editor edits before the live store swaps under every handler;
+      // never block the switch on a failed flush.
+      try {
+        await flushRef.current?.()
+      } catch {
+        /* flush failed — proceed with the switch anyway */
+      }
       try {
         const status = await projectsApi.switch(name)
         setProject(status)
@@ -98,6 +115,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
       refreshProjects,
       switchProject,
       syncProject,
+      registerFlush,
       rev,
       bump,
       toast,
@@ -110,6 +128,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
       refreshProjects,
       switchProject,
       syncProject,
+      registerFlush,
       rev,
       bump,
       toast,

@@ -20,6 +20,7 @@ import {
   removeLink,
   searchPages,
 } from '../core/wiki'
+import { resolveAgent } from '../lib/agent'
 import { formatList } from '../lib/format'
 import { resolveBody } from '../lib/stdin'
 import { exportWiki, renderIndexMarkdown } from '../wiki/export'
@@ -79,7 +80,7 @@ export function wikiCommand(): Command {
           body,
           namespace: opts.namespace,
           tags: splitCsv(opts.tags),
-          agentSource: opts.agent ?? null,
+          agentSource: resolveAgent(opts.agent),
         }),
       )
       console.log(
@@ -156,12 +157,12 @@ export function wikiCommand(): Command {
           return
         }
         const to = await resolvePage(db, toRef)
-        await removeLink(
+        const removed = await removeLink(
           db,
           from.id,
           to ? { toId: to.id, type: opts.type } : { toTitle: toRef, type: opts.type },
         )
-        console.log('Unlinked.')
+        console.log(removed > 0 ? `Unlinked (${removed}).` : 'No matching link to remove.')
       })
     })
 
@@ -180,7 +181,7 @@ export function wikiCommand(): Command {
         }
         await deleteContext(db, page.id, {
           hard: Boolean(opts.hard),
-          agentSource: opts.agent ?? null,
+          agentSource: resolveAgent(opts.agent),
         })
         console.log(
           `${opts.hard ? 'Hard-deleted' : 'Soft-deleted'} page "${page.title}" (${page.id})`,
@@ -285,9 +286,14 @@ export function wikiCommand(): Command {
           title,
           body,
           uri: opts.uri,
-          agentSource: opts.agent ?? null,
+          agentSource: resolveAgent(opts.agent),
         })
-        await appendLog(db, { op: 'ingest', refId: p.id, title, agentSource: opts.agent ?? null })
+        await appendLog(db, {
+          op: 'ingest',
+          refId: p.id,
+          title,
+          agentSource: resolveAgent(opts.agent),
+        })
         return p
       })
       if (opts.json) {

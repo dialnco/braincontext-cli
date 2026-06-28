@@ -15,6 +15,9 @@ import { parseFrontmatter } from '../lib/frontmatter'
 /** Sidecar written by `export --targets store` so `import --prune` knows the export's scope. */
 export const EXPORT_MANIFEST = '.braincontext-export.json'
 
+/** Skip reason for a file whose frontmatter could not be parsed (used to gate --prune). */
+export const MALFORMED_FRONTMATTER = 'malformed frontmatter'
+
 export interface ExportFilters {
   namespace?: string
   kind?: string
@@ -137,7 +140,7 @@ export async function planImport(
   const update: Array<{ entry: FileEntry; id: string }> = []
   const skipped: Array<{ file: string; reason: string }> = badFiles.map((file) => ({
     file,
-    reason: 'malformed frontmatter',
+    reason: MALFORMED_FRONTMATTER,
   }))
   const seenIds = new Set<string>()
   let unchanged = 0
@@ -155,13 +158,27 @@ export async function planImport(
           continue
         }
         seenIds.add(e.id)
-        const changed =
+        // kind/scope/namespace are structural identity: synced on create, immutable on
+        // update (re-homing must be a deliberate `bctx update`, not a side effect of a
+        // text edit). Surface a divergence instead of silently reporting "unchanged".
+        const idShift =
+          (e.kind !== undefined && e.kind !== existing.kind) ||
+          (e.scope !== undefined && e.scope !== existing.scope) ||
+          e.namespace !== existing.namespace
+        const contentChanged =
           (e.title ?? null) !== (existing.title ?? null) ||
           e.body.trim() !== existing.body.trim() ||
           !sameTags(e.tags, existing.tags) ||
           stableJson(e.metadata) !== stableJson(existing.metadata)
-        if (changed) update.push({ entry: e, id: e.id })
-        else unchanged++
+        if (idShift) {
+          skipped.push({
+            file: e.file,
+            reason:
+              'kind/scope/namespace differ but are immutable on import — change with `bctx update`',
+          })
+        }
+        if (contentChanged) update.push({ entry: e, id: e.id })
+        else if (!idShift) unchanged++
         continue
       }
     }
@@ -216,6 +233,18 @@ export async function applyImport(
     throw new Error(
       `Cannot --prune: no ${EXPORT_MANIFEST} in this directory (was it produced by \`export --targets store\`?). Pass --namespace <ns> to scope the prune explicitly.`,
     )
+  }
+
+  // A present-but-unparseable file would be wrongly treated as "gone" (its id never lands
+  // in the seen set) and its context soft-deleted on --prune. Refuse rather than risk it.
+  if (opts.prune) {
+    const parseFailures = plan.skipped.filter((s) => s.reason === MALFORMED_FRONTMATTER)
+    if (parseFailures.length > 0) {
+      const names = parseFailures.map((s) => s.file).join(', ')
+      throw new Error(
+        `Cannot --prune: ${parseFailures.length} file(s) failed to parse (${names}). A present-but-unreadable file would be wrongly treated as deleted — fix or remove it, then re-run.`,
+      )
+    }
   }
 
   if (!opts.dryRun) {

@@ -44,6 +44,9 @@ export interface StoreProvider {
   switch(name: string): Promise<ProjectStatus>
   sync(): Promise<void>
   close(): Promise<void>
+  /** Bracket a data request so a project switch can quiesce before closing the old store. */
+  enter(): void
+  leave(): void
 }
 
 /** Open + prepare + (optionally) sync + migrate a target into a ready Store. */
@@ -78,6 +81,25 @@ export async function createStoreManager(opts: DbOpts): Promise<StoreProvider> {
   const noSync = !!opts.noSync
   let chain: Promise<unknown> = Promise.resolve()
 
+  // In-flight data-request counter so a project switch waits for handlers that already
+  // captured the old store handle to finish before we close it (avoids destroying a
+  // connection mid-query). Bounded by a timeout so a hung request can't wedge a switch.
+  let inflight = 0
+  let drainWaiters: Array<() => void> = []
+  const drain = (): Promise<void> =>
+    inflight === 0 ? Promise.resolve() : new Promise<void>((resolve) => drainWaiters.push(resolve))
+  const enter = (): void => {
+    inflight++
+  }
+  const leave = (): void => {
+    inflight = Math.max(0, inflight - 1)
+    if (inflight === 0 && drainWaiters.length > 0) {
+      const waiters = drainWaiters
+      drainWaiters = []
+      for (const w of waiters) w()
+    }
+  }
+
   const status = (): ProjectStatus => ({
     project: name,
     mode: target.mode,
@@ -95,6 +117,9 @@ export async function createStoreManager(opts: DbOpts): Promise<StoreProvider> {
     store = nextStore
     target = projectToTarget(next, entry)
     name = next
+    // Let in-flight data requests holding the old handle finish first (bounded at 3s so a
+    // stuck request can't wedge the switch). The switch route itself is not counted.
+    await Promise.race([drain(), new Promise<void>((r) => setTimeout(r, 3000))])
     await old.close()
     return status()
   }
@@ -112,6 +137,8 @@ export async function createStoreManager(opts: DbOpts): Promise<StoreProvider> {
     },
     sync: () => store.sync(),
     close: () => store.close(),
+    enter,
+    leave,
   }
 }
 
@@ -127,5 +154,7 @@ export function staticProvider(db: Kysely<Database>): StoreProvider {
     switch: async () => ({ project: 'test', mode: 'local', location: ':test:', noSync: true }),
     sync: async () => undefined,
     close: async () => undefined,
+    enter: () => undefined,
+    leave: () => undefined,
   }
 }
