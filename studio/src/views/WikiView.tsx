@@ -195,7 +195,11 @@ export function WikiView({ onNav }: { onNav: (v: 'wiki' | 'contexts') => void })
         >
           {page ? (
             <div style={sx('flex:1;min-height:0;display:flex;flex-direction:column;')}>
-              <div style={sx('max-width:720px;margin:0 auto;width:100%;padding:30px 56px 0;')}>
+              <div
+                style={sx(
+                  `max-width:720px;${layout === 'dual' ? '' : 'margin:0 auto;'}width:100%;padding:30px 56px 0;`,
+                )}
+              >
                 <div
                   style={sx("font:400 12px 'IBM Plex Mono';color:var(--muted);margin-bottom:14px;")}
                 >
