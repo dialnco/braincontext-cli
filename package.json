@@ -4,6 +4,7 @@
   "description": "Local-first SQLite CLI for saving and retrieving shared context across AI coding agents (Claude, Codex, Cursor, ...).",
   "type": "module",
   "license": "MIT",
+  "packageManager": "pnpm@10.9.0",
   "engines": {
     "node": ">=22"
   },
