@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { Context, LinkView, WikiGraph } from '../api/types'
 import { wikiApi } from '../api/wiki'
+import { ConfirmDeleteDialog } from '../components/common/ConfirmDeleteDialog'
 import { GraphOverlay } from '../components/graph/GraphOverlay'
 import { CommandPalette, type PaletteCommand } from '../components/layout/CommandPalette'
 import { ProjectSwitcher } from '../components/layout/ProjectSwitcher'
@@ -8,7 +9,7 @@ import { Sidebar } from '../components/layout/Sidebar'
 import { TopBar } from '../components/layout/TopBar'
 import { RightPanel } from '../components/wiki/RightPanel'
 import { WikiEditor, type WikiEditorHandle } from '../editor/WikiEditor'
-import { sx } from '../lib/dc'
+import { Hov, sx } from '../lib/dc'
 import { pageHref, useRoute } from '../state/router'
 import { useApp } from '../state/StoreContext'
 import { useAsync } from '../state/useAsync'
@@ -32,6 +33,7 @@ export function WikiView({ onNav }: { onNav: (v: 'wiki' | 'contexts') => void })
   const [projectsOpen, setProjectsOpen] = useState(false)
   const [localRev, setLocalRev] = useState(0)
   const [tagFilter, setTagFilter] = useState<string | null>(null)
+  const [pendingDelete, setPendingDelete] = useState<Context | null>(null)
 
   const projectKey = app.project?.project ?? ''
   const pagesState = useAsync(() => wikiApi.list({ limit: 1000 }), [app.rev, projectKey])
@@ -106,6 +108,23 @@ export function WikiView({ onNav }: { onNav: (v: 'wiki' | 'contexts') => void })
       setLocalRev((r) => r + 1)
     },
     [activeId],
+  )
+
+  const onDeletePage = useCallback(
+    async (id: string, hard: boolean) => {
+      try {
+        await editorRef.current?.flush() // avoid an in-flight autosave racing the delete
+        await wikiApi.remove(id, hard)
+        const next = pages.find((p) => p.id !== id)
+        pagesState.reload()
+        if (id === activeId) route.navigate(next ? pageHref(next.id) : '/')
+        setLocalRev((r) => r + 1)
+        app.toast('Deleted')
+      } catch (e) {
+        app.toast(e instanceof Error ? e.message : 'Delete failed')
+      }
+    },
+    [pages, activeId, pagesState, route, app],
   )
 
   const onLinkMention = useCallback(
@@ -211,9 +230,25 @@ export function WikiView({ onNav }: { onNav: (v: 'wiki' | 'contexts') => void })
                 )}
               >
                 <div
-                  style={sx("font:400 12px 'IBM Plex Mono';color:var(--muted);margin-bottom:14px;")}
+                  style={sx(
+                    'display:flex;align-items:center;gap:10px;margin-bottom:14px;min-height:24px;',
+                  )}
                 >
-                  {page.pageType} {readOnly ? '· read-only source' : ''}
+                  <span style={sx("font:400 12px 'IBM Plex Mono';color:var(--muted);")}>
+                    {page.pageType} {readOnly ? '· read-only source' : ''}
+                  </span>
+                  <span style={sx('flex:1;')} />
+                  <Hov
+                    as="button"
+                    base={sx(
+                      "font:500 11px 'IBM Plex Mono';color:#b4533f;background:transparent;border:1px solid var(--border);border-radius:7px;padding:4px 11px;cursor:pointer;",
+                    )}
+                    hover={sx('border-color:#b4533f;')}
+                    onClick={() => setPendingDelete(page)}
+                    title="Delete this page"
+                  >
+                    Delete
+                  </Hov>
                 </div>
                 <div
                   style={sx(
@@ -287,6 +322,17 @@ export function WikiView({ onNav }: { onNav: (v: 'wiki' | 'contexts') => void })
           onClose={() => setPaletteOpen(false)}
           onOpen={flushThenNavigate}
           onCreate={(t) => void createPage(t).then((p) => p && flushThenNavigate(p.id))}
+        />
+      )}
+      {pendingDelete && (
+        <ConfirmDeleteDialog
+          heading="Delete page"
+          name={pendingDelete.title || 'Untitled'}
+          onConfirm={async (hard) => {
+            await onDeletePage(pendingDelete.id, hard)
+            setPendingDelete(null)
+          }}
+          onCancel={() => setPendingDelete(null)}
         />
       )}
     </>

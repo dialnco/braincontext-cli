@@ -1,6 +1,7 @@
 import { useCallback, useRef, useState } from 'react'
 import { contextsApi } from '../api/contexts'
 import { type Context, KINDS, type Kind, SCOPES, type Scope } from '../api/types'
+import { ConfirmDeleteDialog } from '../components/common/ConfirmDeleteDialog'
 import { ExportPreview } from '../components/contexts/ExportPreview'
 import { ProjectSwitcher } from '../components/layout/ProjectSwitcher'
 import { TopBar } from '../components/layout/TopBar'
@@ -26,6 +27,7 @@ export function ContextsView({ onNav }: { onNav: (v: 'wiki' | 'contexts') => voi
   const [projectsOpen, setProjectsOpen] = useState(false)
   const [showExport, setShowExport] = useState(false)
   const [localRev, setLocalRev] = useState(0)
+  const [pendingDelete, setPendingDelete] = useState<Context | null>(null)
 
   const projectKey = app.project?.project ?? ''
   const listState = useAsync(
@@ -61,9 +63,9 @@ export function ContextsView({ onNav }: { onNav: (v: 'wiki' | 'contexts') => voi
   }, [app])
 
   const onDelete = useCallback(
-    async (id: string) => {
+    async (id: string, hard: boolean) => {
       try {
-        await contextsApi.remove(id)
+        await contextsApi.remove(id, hard)
         setSelectedId((s) => (s === id ? null : s))
         setLocalRev((r) => r + 1)
         app.toast('Deleted')
@@ -234,7 +236,7 @@ export function ContextsView({ onNav }: { onNav: (v: 'wiki' | 'contexts') => voi
               key={detail.data.id}
               ctx={detail.data}
               onSaved={() => setLocalRev((r) => r + 1)}
-              onDelete={() => onDelete(detail.data!.id)}
+              onDelete={() => setPendingDelete(detail.data!)}
               toast={app.toast}
             />
           ) : (
@@ -254,6 +256,17 @@ export function ContextsView({ onNav }: { onNav: (v: 'wiki' | 'contexts') => voi
           projects={app.projects}
           onSwitch={app.switchProject}
           onClose={() => setProjectsOpen(false)}
+        />
+      )}
+      {pendingDelete && (
+        <ConfirmDeleteDialog
+          heading="Delete context"
+          name={pendingDelete.title || firstLine(pendingDelete.body)}
+          onConfirm={async (hard) => {
+            await onDelete(pendingDelete.id, hard)
+            setPendingDelete(null)
+          }}
+          onCancel={() => setPendingDelete(null)}
         />
       )}
     </>
