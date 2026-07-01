@@ -2,6 +2,8 @@ import { existsSync } from 'node:fs'
 import { serve } from '@hono/node-server'
 import type { Hono } from 'hono'
 import type { DbOpts } from '../core/paths'
+import { isInteractive } from '../lib/ansi'
+import { openInBrowser } from '../lib/open'
 import { resolveStudioDir } from './assets'
 import { renderStudioBanner } from './banner'
 import { buildStudioApp } from './server'
@@ -15,6 +17,8 @@ const MAX_PORT_TRIES = 20
 
 export interface StudioOpts extends DbOpts {
   port?: number
+  /** Open the Studio UI in the default browser once serving (default true). */
+  open?: boolean
 }
 
 /**
@@ -48,13 +52,18 @@ export async function runStudio(opts: StudioOpts): Promise<void> {
   process.on('SIGTERM', shutdown)
 
   const port = await listen(app, opts.port ?? DEFAULT_PORT)
+  const url = `http://${HOST}:${port}`
   const status = stores.status()
   const label = status.project
     ? `${status.project} (${status.mode}) — ${status.location}`
     : status.location
-  console.error(
-    renderStudioBanner({ url: `http://${HOST}:${port}`, storeLabel: label, host: HOST }),
-  )
+  console.error(renderStudioBanner({ url, storeLabel: label, host: HOST }))
+
+  // Launch the UI in the default browser. Skipped for --no-open and for
+  // non-interactive runs (pipes, CI) where popping a browser is unwanted.
+  if (opts.open !== false && isInteractive) {
+    openInBrowser(`${url}/`)
+  }
 }
 
 /** Bind on HOST, incrementing the port on EADDRINUSE. Resolves the actual port. */

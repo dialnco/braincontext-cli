@@ -6,6 +6,7 @@ export function studioCommand(): Command {
   return new Command('studio')
     .description('Serve the braincontext Studio web UI + JSON API over the store (localhost only).')
     .option('-p, --port <number>', 'port to bind (default 8420; auto-increments if busy)')
+    .option('--no-open', 'do not open the Studio UI in a browser on startup')
     .addHelpText(
       'after',
       `
@@ -16,6 +17,10 @@ against the same project on this machine while it runs.
 `,
     )
     .action(async (opts, command: Command) => {
-      await runStudio({ ...dbOptsFrom(command), port: parsePositiveInt(opts.port, 'port') })
+      await runStudio({
+        ...dbOptsFrom(command),
+        port: parsePositiveInt(opts.port, 'port'),
+        open: opts.open,
+      })
     })
 }
