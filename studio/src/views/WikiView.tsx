@@ -152,6 +152,35 @@ export function WikiView({ onNav }: { onNav: (v: 'wiki' | 'contexts') => void })
     [activeId, app],
   )
 
+  const onAddTag = useCallback(
+    async (tag: string) => {
+      if (!activeId) return
+      try {
+        await wikiApi.update(activeId, { addTags: [tag] })
+        setLocalRev((r) => r + 1) // reload the detail → RightPanel shows the new tag
+        pagesState.reload() // reload the list → sidebar tag counts/filter stay correct
+      } catch (e) {
+        app.toast(e instanceof Error ? e.message : 'Add tag failed')
+      }
+    },
+    [activeId, pagesState, app],
+  )
+
+  const onRemoveTag = useCallback(
+    async (tag: string) => {
+      if (!activeId) return
+      try {
+        await wikiApi.update(activeId, { removeTags: [tag] })
+        if (tagFilter === tag) setTagFilter(null) // don't leave a filter on a now-absent tag
+        setLocalRev((r) => r + 1)
+        pagesState.reload()
+      } catch (e) {
+        app.toast(e instanceof Error ? e.message : 'Remove tag failed')
+      }
+    },
+    [activeId, tagFilter, pagesState, app],
+  )
+
   // Global ⌘K.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -333,6 +362,8 @@ export function WikiView({ onNav }: { onNav: (v: 'wiki' | 'contexts') => void })
             onLinkMention={onLinkMention}
             tagFilter={tagFilter}
             onTagClick={(t) => setTagFilter((prev) => (prev === t ? null : t))}
+            onAddTag={onAddTag}
+            onRemoveTag={onRemoveTag}
           />
         )}
 

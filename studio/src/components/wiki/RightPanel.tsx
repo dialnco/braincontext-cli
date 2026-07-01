@@ -12,6 +12,8 @@ interface Props {
   onLinkMention: (mentionId: string) => void
   tagFilter: string | null
   onTagClick: (tag: string) => void
+  onAddTag: (tag: string) => void
+  onRemoveTag: (tag: string) => void
 }
 
 const DIVIDER = 'height:1px;background:var(--border);margin:18px 0;'
@@ -45,6 +47,8 @@ export function RightPanel({
   onLinkMention,
   tagFilter,
   onTagClick,
+  onAddTag,
+  onRemoveTag,
 }: Props) {
   const [tab, setTab] = useState<'linked' | 'unlinked'>('linked')
 
@@ -89,31 +93,18 @@ export function RightPanel({
         <Prop label="created" value={page.createdAt.slice(0, 10)} mono />
         <Prop label="updated" value={page.updatedAt.slice(0, 10)} mono />
       </div>
-      {page.tags.length > 0 && (
-        <div style={sx('display:flex;flex-wrap:wrap;gap:6px;margin-top:12px;')}>
-          {page.tags.map((t) => {
-            const on = t === tagFilter
-            return (
-              <Hov
-                key={t}
-                as="span"
-                base={sx(
-                  `font:500 11px 'IBM Plex Mono';border-radius:6px;padding:2px 8px;cursor:pointer;${on ? 'color:#fff;background:var(--accent);' : 'color:var(--accent-ink);background:var(--accent-soft);'}`,
-                )}
-                hover={sx(
-                  on
-                    ? 'background:var(--accent);'
-                    : 'background:var(--accent-soft);color:var(--accent);',
-                )}
-                onClick={() => onTagClick(t)}
-                title={on ? 'Clear tag filter' : `Filter pages tagged #${t}`}
-              >
-                #{t}
-              </Hov>
-            )
-          })}
-        </div>
-      )}
+      <div style={sx('display:flex;flex-wrap:wrap;gap:6px;margin-top:12px;align-items:center;')}>
+        {page.tags.map((t) => (
+          <TagChip
+            key={t}
+            tag={t}
+            active={t === tagFilter}
+            onFilter={() => onTagClick(t)}
+            onRemove={() => onRemoveTag(t)}
+          />
+        ))}
+        <TagAdd key="__add" existing={page.tags} onAdd={onAddTag} />
+      </div>
 
       {outline.length > 0 && (
         <>
@@ -350,6 +341,101 @@ function Prop({ label, value, mono }: { label: string; value: string; mono?: boo
         {value}
       </span>
     </div>
+  )
+}
+
+function TagChip({
+  tag,
+  active,
+  onFilter,
+  onRemove,
+}: {
+  tag: string
+  active: boolean
+  onFilter: () => void
+  onRemove: () => void
+}) {
+  return (
+    <Hov
+      as="span"
+      base={sx(
+        `display:inline-flex;align-items:center;gap:5px;font:500 11px 'IBM Plex Mono';border-radius:6px;padding:2px 8px;cursor:pointer;${active ? 'color:#fff;background:var(--accent);' : 'color:var(--accent-ink);background:var(--accent-soft);'}`,
+      )}
+      hover={sx(
+        active ? 'background:var(--accent);' : 'background:var(--accent-soft);color:var(--accent);',
+      )}
+      onClick={onFilter}
+      title={active ? 'Clear tag filter' : `Filter pages tagged #${tag}`}
+    >
+      #{tag}
+      <Hov
+        as="span"
+        base={sx('display:inline-flex;opacity:.45;cursor:pointer;')}
+        hover={sx('opacity:1;')}
+        onClick={(e: React.MouseEvent) => {
+          e.stopPropagation()
+          onRemove()
+        }}
+        title="Remove tag"
+      >
+        ✕
+      </Hov>
+    </Hov>
+  )
+}
+
+function TagAdd({ existing, onAdd }: { existing: string[]; onAdd: (tag: string) => void }) {
+  const [open, setOpen] = useState(false)
+  const [val, setVal] = useState('')
+
+  const commit = () => {
+    const parts = val
+      .split(',')
+      .map((t) => t.trim().replace(/^#+/, '').trim())
+      .filter(Boolean)
+    for (const t of parts) if (!existing.includes(t)) onAdd(t)
+    setVal('')
+  }
+
+  if (!open) {
+    return (
+      <Hov
+        as="span"
+        base={sx(
+          "font:500 11px 'IBM Plex Mono';color:var(--accent-ink);border:1px solid var(--accent);border-radius:6px;padding:2px 7px;cursor:pointer;",
+        )}
+        hover={sx('background:var(--accent-soft);')}
+        onClick={() => setOpen(true)}
+        title="Add tag"
+      >
+        +
+      </Hov>
+    )
+  }
+
+  return (
+    <input
+      autoFocus
+      value={val}
+      onChange={(e) => setVal(e.target.value)}
+      onKeyDown={(e) => {
+        if (e.key === 'Enter' || e.key === ',') {
+          e.preventDefault()
+          commit()
+        } else if (e.key === 'Escape') {
+          setVal('')
+          setOpen(false)
+        }
+      }}
+      onBlur={() => {
+        if (val.trim()) commit()
+        setOpen(false)
+      }}
+      placeholder="add tag"
+      style={sx(
+        "width:88px;border:1px solid var(--accent);background:transparent;outline:none;border-radius:6px;padding:2px 7px;font:400 11px 'IBM Plex Mono';color:var(--accent-ink);",
+      )}
+    />
   )
 }
 
