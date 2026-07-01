@@ -93,6 +93,7 @@ export function WikiEditor({
 }: Props) {
   const edRef = useRef<HTMLDivElement>(null)
   const hostRef = useRef<HTMLDivElement>(null)
+  const paneRef = useRef<HTMLDivElement>(null)
   const anchor = useRef<{ node: Node; start: number } | null>(null)
   const slashBlk = useRef<HTMLElement | null>(null)
   const [linkMenu, setLinkMenu] = useState<FloatMenu>(CLOSED_MENU)
@@ -118,6 +119,35 @@ export function WikiEditor({
     return hit?.id ?? ''
   }, [])
 
+  // Size each table's scroll box to break out of the 720px prose column and span
+  // the full pane width (left-aligned to the content). CSS can't do this: the pane
+  // width varies with the sidebar / right panel / dual pane, so we measure the live
+  // layout. The table keeps width:max-content, so this max-width is what clamps it
+  // and turns on its internal horizontal scroll. Re-run on every layout change (see
+  // the ResizeObserver below) and after edits that may add/resize a table.
+  const sizeTables = useCallback(() => {
+    const ed = edRef.current
+    const pane = paneRef.current
+    if (!ed || !pane) return
+    const paneRect = pane.getBoundingClientRect()
+    const availRight = paneRect.left + pane.clientWidth // clientWidth excludes the scrollbar
+    for (const el of ed.querySelectorAll('table')) {
+      const table = el as HTMLElement
+      const left = table.getBoundingClientRect().left // block flow left, independent of width
+      table.style.maxWidth = `${Math.round(Math.max(120, availRight - left - 24))}px`
+    }
+  }, [])
+
+  // Re-fit tables whenever the pane resizes: window resize, or any panel toggling
+  // (sidebar / right panel / dual pane) that changes the available width.
+  useEffect(() => {
+    const pane = paneRef.current
+    if (!pane) return
+    const ro = new ResizeObserver(() => sizeTables())
+    ro.observe(pane)
+    return () => ro.disconnect()
+  }, [sizeTables])
+
   const autosave = useAutosave(onSave)
   useEffect(() => {
     if (handleRef) handleRef.current = { flush: autosave.flush }
@@ -134,6 +164,7 @@ export function WikiEditor({
     ed.innerHTML = markdownToHtml(page.body, resolveTitle)
     ed.scrollTop = 0
     setWords((ed.textContent?.trim().match(/\S+/g) || []).length)
+    sizeTables()
   }, [page.id])
 
   // Sync the dual-pane markdown source when it opens or the page changes. Without
@@ -481,9 +512,10 @@ export function WikiEditor({
 
   const onInput = useCallback(() => {
     persist()
+    sizeTables()
     maybeLink()
     maybeSlash()
-  }, [persist, maybeLink, maybeSlash])
+  }, [persist, sizeTables, maybeLink, maybeSlash])
 
   const onKeyUp = useCallback(
     (e: React.KeyboardEvent) => {
@@ -634,7 +666,11 @@ export function WikiEditor({
       ref={hostRef}
       style={sx('flex:1;min-width:0;min-height:0;display:flex;position:relative;')}
     >
-      <div className="scroll" style={sx('flex:1;min-width:0;overflow-y:auto;')}>
+      <div
+        ref={paneRef}
+        className="scroll"
+        style={sx('flex:1;min-width:0;overflow-x:hidden;overflow-y:auto;')}
+      >
         <div style={sx('max-width:720px;margin:0 auto;padding:34px 56px 120px;')}>
           <div
             data-editor=""

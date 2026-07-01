@@ -56,10 +56,17 @@ export const S = {
     'margin:0 0 18px;border:1px solid var(--border);background:var(--accent-soft);border-radius:11px;padding:13px 16px;',
   cT: "font:600 11px/1 'IBM Plex Mono',monospace;letter-spacing:.09em;text-transform:uppercase;color:var(--accent-ink);margin:0 0 6px;",
   cP: "font:400 16px/1.6 'Spectral',serif;color:var(--ink-soft);margin:0;",
+  // A wide table renders as its OWN scroll box (display:block + overflow:auto): it
+  // breaks out to the full pane width — JS sets the exact max-width per layout since
+  // the side panels vary, see WikiEditor.sizeTables — and scrolls both axes in place
+  // instead of dragging the page. max-height caps very tall tables so the sticky
+  // header below has a vertical scroll context. width:max-content lets it exceed the
+  // 720px prose column; max-width:100% is the pre-JS fallback. border-collapse MUST
+  // be `separate` (not collapse) or the sticky <th>'s border doesn't scroll with it.
   table:
-    'border-collapse:collapse;margin:0 0 20px;max-width:100%;border:1px solid var(--border);border-radius:9px;overflow:hidden;',
-  th: "text-align:left;font:600 13.5px/1.5 'IBM Plex Sans',sans-serif;color:var(--ink);background:var(--code-bg);border:1px solid var(--border);padding:9px 14px;",
-  td: "font:400 16px/1.6 'Spectral',serif;color:var(--ink-soft);border:1px solid var(--border);padding:9px 14px;vertical-align:top;",
+    'display:block;width:max-content;max-width:100%;max-height:70vh;overflow:auto;border-collapse:separate;border-spacing:0;border-radius:10px;margin:0 0 20px;',
+  th: "position:sticky;top:0;z-index:1;text-align:left;white-space:nowrap;font:600 13.5px/1.5 'IBM Plex Sans',sans-serif;color:var(--ink);background:var(--code-bg);border-right:1px solid var(--border);border-bottom:1px solid var(--border);padding:9px 14px;",
+  td: "font:400 16px/1.6 'Spectral',serif;color:var(--ink-soft);border-right:1px solid var(--border);border-bottom:1px solid var(--border);padding:9px 14px;vertical-align:top;",
 } as const
 
 /** A short glyph per wiki page type, for the sidebar / palette / graph legend. */
