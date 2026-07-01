@@ -104,6 +104,29 @@ This mirrors the [agent-browser](https://github.com/vercel-labs/agent-browser#sk
 pattern, so `npx skills add <repo>` can drop a stub that points back at
 `bctx skills get braincontext`.
 
+### Install a skill into a project (`bctx skill init`)
+
+Scaffold the skill into the current project so any agent picks it up. Following the
+[skills.sh](https://www.skills.sh/) convention, the skill lives **once** under
+`.agents/skills/<name>/` and is **symlinked** into each agent's skills dir — so
+`.agents`-aware and `.claude`-aware agents share the same base:
+
+```bash
+bctx skill init                      # .agents/skills/braincontext + .claude symlink
+bctx skill init braincontext-wiki    # install a specific bundled skill
+bctx skill init --full               # copy SKILL.md + references/* instead of a stub
+bctx skill init --no-symlink         # copy into each agent dir (no symlink support)
+```
+
+By default it writes a tiny **discovery stub** (frontmatter + a pointer to
+`bctx skills get <name> --full`) so the content stays version-matched to the installed
+CLI and never drifts. It's idempotent; `--force` replaces a pre-existing non-managed entry.
+
+```
+.agents/skills/braincontext/SKILL.md          # canonical (stub, or --full docs)
+.claude/skills/braincontext -> ../../.agents/skills/braincontext
+```
+
 ## MCP server (read & write from any agent)
 
 Run an MCP stdio server so Claude/Cursor/Codex read and write the same store

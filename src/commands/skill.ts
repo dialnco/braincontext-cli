@@ -7,7 +7,8 @@ import { formatList } from '../lib/format'
 import { readSkillDir } from '../skillbundles/parse'
 import { reconstructSkill } from '../skillbundles/reconstruct'
 import { validateSkill } from '../skillbundles/validate'
-import { dbOptsFrom } from './_shared'
+import { type InstallResult, installSkill } from '../skills/install'
+import { dbOptsFrom, splitCsv } from './_shared'
 
 export function skillCommand(): Command {
   const skill = new Command('skill').description(
@@ -74,6 +75,52 @@ export function skillCommand(): Command {
       }
       const root = reconstructSkill(loaded, resolve(dir))
       console.log(`Exported skill "${name}" to ${root}`)
+    })
+
+  skill
+    .command('init [name]')
+    .description(
+      'Scaffold a bundled skill into this project: .agents/skills/<name> + agent symlinks.',
+    )
+    .option('--full', 'copy the full SKILL.md + references instead of a discovery stub')
+    .option('--agents <list>', 'comma-separated agent dirs to link into (default: claude)')
+    .option('--dir <path>', 'project root to write into (default: current directory)')
+    .option('--no-symlink', 'copy the skill into each agent dir instead of symlinking')
+    .option('--force', 'replace an existing non-managed entry at an agent path')
+    .option('--json', 'output JSON')
+    .action((name: string | undefined, opts) => {
+      const agents = splitCsv(opts.agents)
+      let result: InstallResult
+      try {
+        result = installSkill({
+          name: name ?? 'braincontext',
+          dir: resolve(opts.dir ?? process.cwd()),
+          full: Boolean(opts.full),
+          agents: agents.length > 0 ? agents : undefined,
+          // commander exposes `--no-symlink` as `opts.symlink === false`.
+          noSymlink: opts.symlink === false,
+          force: Boolean(opts.force),
+        })
+      } catch (err) {
+        console.error(err instanceof Error ? err.message : String(err))
+        process.exitCode = 1
+        return
+      }
+
+      if (opts.json) {
+        console.log(JSON.stringify(result, null, 2))
+        return
+      }
+
+      console.log(`Installed skill "${result.name}" (${result.mode}) → ${result.canonicalDir}`)
+      for (const link of result.links) {
+        const how = link.target ? `→ ${link.target} (${link.action})` : `(${link.action})`
+        console.log(`  ${link.path} ${how}`)
+      }
+      console.log(
+        `\nAgents that read .agents/skills or an agent skills dir now load the "${result.name}" skill.`,
+      )
+      console.log(`See the full, version-matched content: bctx skills get ${result.name} --full`)
     })
 
   skill
