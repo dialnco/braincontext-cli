@@ -25,7 +25,7 @@ export function dbOptsFrom(command: Command): DbOpts {
 export async function requireContext(db: Kysely<Database>, id: string): Promise<Context | null> {
   const ctx = await getContext(db, id)
   if (ctx && ctx.pageType !== null) {
-    throw new Error(`${id} is a wiki page — use \`bctx wiki get/show/rm\` instead.`)
+    throw new Error(`${id} is a wiki page — use \`bctx wiki update/show/rm\` instead.`)
   }
   return ctx
 }

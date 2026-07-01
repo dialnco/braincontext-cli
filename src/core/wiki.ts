@@ -212,6 +212,17 @@ export async function getPageByTitle(db: Kysely<Database>, title: string): Promi
   return matches[0] ? getContext(db, matches[0].id) : null
 }
 
+/**
+ * Resolve an `<id|slug|title>` reference to a wiki page. Exact indexed keys (id,
+ * slug) are tried before the fuzzy normalized-title match, so a title collision
+ * can't mask an exact slug hit.
+ */
+export async function resolvePageRef(db: Kysely<Database>, ref: string): Promise<Context | null> {
+  return (
+    (await getPage(db, ref)) ?? (await getPageBySlug(db, ref)) ?? (await getPageByTitle(db, ref))
+  )
+}
+
 export async function updatePage(
   db: Kysely<Database>,
   id: string,

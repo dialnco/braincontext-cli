@@ -7,6 +7,7 @@ import {
   getPageByTitle,
   outboundLinks,
   recordSource,
+  resolvePageRef,
   updatePage,
 } from '../src/core/wiki'
 import { freshDb } from './_db'
@@ -44,6 +45,36 @@ describe('wiki pages & links', () => {
     const db = await freshDb()
     const s = await recordSource(db, { title: 'Doc', body: 'raw bytes' })
     await expect(updatePage(db, s.id, { body: 'x' })).rejects.toThrow(/immutable/)
+    await db.destroy()
+  })
+
+  it('resolvePageRef resolves by id, slug, or title', async () => {
+    const db = await freshDb()
+    const page = await createPage(db, {
+      title: 'Active Clients Roster',
+      pageType: 'entity',
+      body: 'x',
+    })
+    expect(page.slug).toBe('active-clients-roster')
+    expect((await resolvePageRef(db, page.id))?.id).toBe(page.id)
+    expect((await resolvePageRef(db, page.slug as string))?.id).toBe(page.id)
+    expect((await resolvePageRef(db, 'Active Clients Roster'))?.id).toBe(page.id)
+    expect(await resolvePageRef(db, 'no-such-ref')).toBeNull()
+    await db.destroy()
+  })
+
+  it('resolvePageRef prefers an exact slug over a fuzzy title match', async () => {
+    const db = await freshDb()
+    // "gateway" the slug vs. "Gateway" the title on two different pages.
+    const bySlug = await createPage(db, {
+      title: 'Edge Service',
+      pageType: 'entity',
+      body: '',
+      slug: 'gateway',
+    })
+    await createPage(db, { title: 'Gateway', pageType: 'entity', body: '' })
+    expect(bySlug.slug).toBe('gateway')
+    expect((await resolvePageRef(db, 'gateway'))?.id).toBe(bySlug.id)
     await db.destroy()
   })
 

@@ -1,36 +1,30 @@
 import { basename, resolve } from 'node:path'
 import { Command } from 'commander'
-import type { Kysely } from 'kysely'
 import { z } from 'zod'
-import { type Context, deleteContext } from '../core/contexts'
+import { type Context, deleteContext, type UpdateInput } from '../core/contexts'
 import { withDb } from '../core/db'
-import { AUTHORED_PAGE_TYPES, type Database, LINK_TYPES } from '../core/types'
+import { AUTHORED_PAGE_TYPES, LINK_TYPES } from '../core/types'
 import {
   addLink,
   appendLog,
   backlinks,
   createPage,
-  getPage,
-  getPageByTitle,
   lint,
   listLog,
   listPages,
   outboundLinks,
   recordSource,
   removeLink,
+  resolvePageRef,
   searchPages,
+  updatePage,
 } from '../core/wiki'
 import { resolveAgent } from '../lib/agent'
 import { formatList } from '../lib/format'
 import { resolveBody } from '../lib/stdin'
 import { exportWiki, renderIndexMarkdown } from '../wiki/export'
 import { importWiki } from '../wiki/import'
-import { dbOptsFrom, parsePositiveInt, splitCsv } from './_shared'
-
-/** Resolve an `<id|title>` reference to a page. */
-async function resolvePage(db: Kysely<Database>, ref: string): Promise<Context | null> {
-  return (await getPage(db, ref)) ?? (await getPageByTitle(db, ref))
-}
+import { collect, dbOptsFrom, parsePositiveInt, splitCsv } from './_shared'
 
 function printPage(
   page: Context,
@@ -92,10 +86,10 @@ export function wikiCommand(): Command {
 
   wiki
     .command('get <ref>')
-    .description('Fetch a page by id or title.')
+    .description('Fetch a page by id, slug, or title.')
     .option('--json', 'output JSON')
     .action(async (ref: string, opts, command: Command) => {
-      const page = await withDb(dbOptsFrom(command), (db) => resolvePage(db, ref))
+      const page = await withDb(dbOptsFrom(command), (db) => resolvePageRef(db, ref))
       if (!page) {
         console.error(`No wiki page matching "${ref}".`)
         process.exitCode = 1
@@ -105,11 +99,58 @@ export function wikiCommand(): Command {
     })
 
   wiki
+    .command('update <ref>')
+    .alias('edit')
+    .description(
+      'Edit a wiki page in place (by id, slug, or title): title/body/tags. Re-syncs [[links]] from the new body. Source pages are immutable.',
+    )
+    .option('--title <title>', 'set the title')
+    .option('--body <text>', 'set the body inline (or use --file / stdin)')
+    .option('--file <path>', 'set the body from a file (use - for stdin)')
+    .option('--add-tag <tag>', 'add a tag (repeatable)', collect, [])
+    .option('--rm-tag <tag>', 'remove a tag (repeatable)', collect, [])
+    .option('--agent <name>', 'agent source label for this change')
+    .option('--json', 'output JSON')
+    .action(async (ref: string, opts, command: Command) => {
+      const patch: UpdateInput = {}
+      if (opts.title !== undefined) patch.title = opts.title
+      if (opts.body !== undefined) patch.body = opts.body
+      else if (opts.file) patch.body = await resolveBody(opts.file, [])
+      if (patch.body !== undefined && !patch.body.trim()) {
+        throw new Error(
+          'Refusing to set an empty body (this would wipe the content). Omit --body/--file to keep it.',
+        )
+      }
+      if (opts.addTag.length > 0) patch.addTags = opts.addTag
+      if (opts.rmTag.length > 0) patch.removeTags = opts.rmTag
+      if (opts.agent) patch.agentSource = resolveAgent(opts.agent)
+      if (Object.keys(patch).length === 0) {
+        throw new Error('Nothing to update. Pass --title, --body/--file, --add-tag, or --rm-tag.')
+      }
+
+      const page = await withDb(dbOptsFrom(command), async (db) => {
+        const target = await resolvePageRef(db, ref)
+        if (!target) return null
+        return updatePage(db, target.id, patch)
+      })
+      if (!page) {
+        console.error(`No wiki page matching "${ref}".`)
+        process.exitCode = 1
+        return
+      }
+      console.log(
+        opts.json
+          ? JSON.stringify(page, null, 2)
+          : `Updated page "${page.title}" (${page.id}) [${page.slug}]`,
+      )
+    })
+
+  wiki
     .command('show <ref>')
     .description('Show a page with its outbound links and backlinks.')
     .action(async (ref: string, _opts, command: Command) => {
       await withDb(dbOptsFrom(command), async (db) => {
-        const page = await resolvePage(db, ref)
+        const page = await resolvePageRef(db, ref)
         if (!page) {
           console.error(`No wiki page matching "${ref}".`)
           process.exitCode = 1
@@ -130,13 +171,13 @@ export function wikiCommand(): Command {
     .action(async (fromRef: string, toRef: string, opts, command: Command) => {
       const type = z.enum(LINK_TYPES).parse(opts.type)
       await withDb(dbOptsFrom(command), async (db) => {
-        const from = await resolvePage(db, fromRef)
+        const from = await resolvePageRef(db, fromRef)
         if (!from) {
           console.error(`No source page matching "${fromRef}".`)
           process.exitCode = 1
           return
         }
-        const to = await resolvePage(db, toRef)
+        const to = await resolvePageRef(db, toRef)
         await addLink(db, from.id, to ? { toId: to.id, type } : { toTitle: toRef, type })
         console.log(
           `Linked "${from.title}" -[${type}]-> ${to ? `"${to.title}"` : `[[${toRef}]] (wanted)`}`,
@@ -150,13 +191,13 @@ export function wikiCommand(): Command {
     .option('--type <type>', 'restrict to a link type')
     .action(async (fromRef: string, toRef: string, opts, command: Command) => {
       await withDb(dbOptsFrom(command), async (db) => {
-        const from = await resolvePage(db, fromRef)
+        const from = await resolvePageRef(db, fromRef)
         if (!from) {
           console.error(`No source page matching "${fromRef}".`)
           process.exitCode = 1
           return
         }
-        const to = await resolvePage(db, toRef)
+        const to = await resolvePageRef(db, toRef)
         const removed = await removeLink(
           db,
           from.id,
@@ -173,7 +214,7 @@ export function wikiCommand(): Command {
     .option('--agent <name>', 'agent source label for this change')
     .action(async (ref: string, opts, command: Command) => {
       await withDb(dbOptsFrom(command), async (db) => {
-        const page = await resolvePage(db, ref)
+        const page = await resolvePageRef(db, ref)
         if (!page) {
           console.error(`No wiki page matching "${ref}".`)
           process.exitCode = 1
@@ -195,7 +236,7 @@ export function wikiCommand(): Command {
     .option('--json', 'output JSON')
     .action(async (ref: string, opts, command: Command) => {
       await withDb(dbOptsFrom(command), async (db) => {
-        const page = await resolvePage(db, ref)
+        const page = await resolvePageRef(db, ref)
         if (!page) {
           console.error(`No wiki page matching "${ref}".`)
           process.exitCode = 1

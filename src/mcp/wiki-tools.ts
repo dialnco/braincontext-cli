@@ -8,12 +8,12 @@ import {
   backlinks,
   createPage,
   getPage,
-  getPageByTitle,
   lint,
   listPages,
   outboundLinks,
   recordSource,
   removeLink,
+  resolvePageRef,
   searchPages,
   updatePage,
   wikiGraph,
@@ -26,7 +26,7 @@ function fail(text: string) {
   return { content: [{ type: 'text' as const, text }], isError: true }
 }
 async function resolveRef(db: Kysely<Database>, ref: string) {
-  return (await getPage(db, ref)) ?? (await getPageByTitle(db, ref))
+  return resolvePageRef(db, ref)
 }
 
 /** Register the wiki tool surface + a wiki resource on an existing MCP server. */
@@ -52,8 +52,9 @@ export function registerWikiTools(server: McpServer, db: Kysely<Database>): void
     'wiki_get',
     {
       title: 'Get wiki page',
-      description: 'Fetch a wiki page (by id or title) with its outbound links and backlinks.',
-      inputSchema: { ref: z.string().describe('page id or title') },
+      description:
+        'Fetch a wiki page (by id, slug, or title) with its outbound links and backlinks.',
+      inputSchema: { ref: z.string().describe('page id, slug, or title') },
     },
     async ({ ref }) => {
       const page = await resolveRef(db, ref)
@@ -91,9 +92,9 @@ export function registerWikiTools(server: McpServer, db: Kysely<Database>): void
     {
       title: 'Update wiki page',
       description:
-        'Edit an existing wiki page (by id or title): body, title, tags. Re-syncs [[links]] from the new body. PREFER this over wiki_new when knowledge already has a home — refine the existing page so the wiki compounds instead of accumulating duplicate-titled pages. Source pages are immutable (use wiki_ingest for new sources).',
+        'Edit an existing wiki page (by id, slug, or title): body, title, tags. Re-syncs [[links]] from the new body. PREFER this over wiki_new when knowledge already has a home — refine the existing page so the wiki compounds instead of accumulating duplicate-titled pages. Source pages are immutable (use wiki_ingest for new sources).',
       inputSchema: {
-        ref: z.string().describe('page id or title'),
+        ref: z.string().describe('page id, slug, or title'),
         title: z.string().optional(),
         body: z.string().optional(),
         addTags: z.array(z.string()).optional(),
@@ -127,8 +128,8 @@ export function registerWikiTools(server: McpServer, db: Kysely<Database>): void
       description:
         'Add a typed link between pages (target may be a not-yet-created title => a wanted link).',
       inputSchema: {
-        from: z.string().describe('source page id or title'),
-        to: z.string().describe('target page id or title'),
+        from: z.string().describe('source page id, slug, or title'),
+        to: z.string().describe('target page id, slug, or title'),
         type: z.enum(LINK_TYPES).default('relates'),
       },
     },
@@ -148,8 +149,8 @@ export function registerWikiTools(server: McpServer, db: Kysely<Database>): void
       description:
         'Remove a typed link from a source page to a target (by id or title). Omit `type` to remove links of any type to that target.',
       inputSchema: {
-        from: z.string().describe('source page id or title'),
-        to: z.string().describe('target page id or title'),
+        from: z.string().describe('source page id, slug, or title'),
+        to: z.string().describe('target page id, slug, or title'),
         type: z.enum(LINK_TYPES).optional(),
       },
     },

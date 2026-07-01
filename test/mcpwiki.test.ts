@@ -58,6 +58,24 @@ describe('mcp wiki tools', () => {
     await db.destroy()
   })
 
+  it('wiki_get resolves a page by its slug', async () => {
+    const db = await freshDb()
+    const client = await connect(db)
+
+    const page = payload(
+      await client.callTool({
+        name: 'wiki_new',
+        arguments: { title: 'Active Clients Roster', type: 'entity', body: 'x' },
+      }),
+    )
+    expect(page.slug).toBe('active-clients-roster')
+
+    const got = payload(await client.callTool({ name: 'wiki_get', arguments: { ref: page.slug } }))
+    expect(got.page.id).toBe(page.id)
+
+    await db.destroy()
+  })
+
   it('wiki_update/unlink/graph are registered; update edits in place and refuses source pages', async () => {
     const db = await freshDb()
     const client = await connect(db)
