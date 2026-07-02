@@ -1,12 +1,17 @@
 import { useMemo, useState } from 'react'
-import type { Context, LinkView } from '../../api/types'
+import type { Context, HistoryEntry, LinkView } from '../../api/types'
 import { Hov, sx } from '../../lib/dc'
+import { pageFreshness } from '../../lib/freshness'
+import { relTime } from '../../lib/time'
+import { estimateTokens, formatTokens } from '../../lib/tokens'
 
 interface Props {
   page: Context
   pages: Context[]
   links: LinkView[]
   backlinks: LinkView[]
+  /** Audit trail for this page, newest first. */
+  history: HistoryEntry[]
   onOpen: (id: string) => void
   onExpandGraph: () => void
   onLinkMention: (mentionId: string) => void
@@ -42,6 +47,7 @@ export function RightPanel({
   pages,
   links,
   backlinks,
+  history,
   onOpen,
   onExpandGraph,
   onLinkMention,
@@ -50,7 +56,8 @@ export function RightPanel({
   onAddTag,
   onRemoveTag,
 }: Props) {
-  const [tab, setTab] = useState<'linked' | 'unlinked'>('linked')
+  const [tab, setTab] = useState<'linked' | 'unlinked' | 'history'>('linked')
+  const fresh = pageFreshness(page)
 
   const outline = useMemo(() => {
     const out: string[] = []
@@ -92,6 +99,14 @@ export function RightPanel({
         <Prop label="slug" value={page.slug ?? '—'} mono />
         <Prop label="created" value={page.createdAt.slice(0, 10)} mono />
         <Prop label="updated" value={page.updatedAt.slice(0, 10)} mono />
+        <Prop label="tokens" value={formatTokens(estimateTokens(page.body))} mono />
+        {fresh.verifiedAt && (
+          <Prop
+            label="verified"
+            value={`${fresh.verifiedAt.slice(0, 10)}${fresh.verifiedBy ? ` · ${fresh.verifiedBy}` : ''}`}
+            mono
+          />
+        )}
       </div>
       <div style={sx('display:flex;flex-wrap:wrap;gap:6px;margin-top:12px;align-items:center;')}>
         {page.tags.map((t) => (
@@ -196,6 +211,9 @@ export function RightPanel({
         <span onClick={() => setTab('unlinked')} style={sx(tabSty(tab === 'unlinked'))}>
           Unlinked · {unlinked.length}
         </span>
+        <span onClick={() => setTab('history')} style={sx(tabSty(tab === 'history'))}>
+          History · {history.length}
+        </span>
       </div>
       {tab === 'linked' &&
         (backlinks.length === 0 ? (
@@ -227,6 +245,45 @@ export function RightPanel({
               </Hov>
             )
           })
+        ))}
+      {tab === 'history' &&
+        (history.length === 0 ? (
+          <Empty text="No recorded changes yet." />
+        ) : (
+          history.map((h) => (
+            <div
+              key={h.id}
+              style={sx(
+                'display:flex;align-items:center;gap:8px;padding:6px 4px;border-bottom:1px solid var(--border);',
+              )}
+            >
+              <span
+                style={sx(
+                  `flex:0 0 52px;font:500 10.5px 'IBM Plex Mono';color:${
+                    h.event === 'delete' ? '#b4533f' : 'var(--accent-ink)'
+                  };`,
+                )}
+              >
+                {h.event}
+              </span>
+              <span
+                style={sx(
+                  "flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font:400 12px 'IBM Plex Sans';color:var(--ink-soft);",
+                )}
+                title={h.agentSource ?? undefined}
+              >
+                {h.agentSource ?? '—'}
+              </span>
+              <span
+                style={sx(
+                  "flex:0 0 auto;font:400 10.5px 'IBM Plex Mono';color:var(--muted);white-space:nowrap;",
+                )}
+                title={h.changedAt}
+              >
+                {relTime(h.changedAt)}
+              </span>
+            </div>
+          ))
         ))}
       {tab === 'unlinked' &&
         (unlinked.length === 0 ? (

@@ -113,6 +113,31 @@ export interface ProjectInfo {
   current: boolean
 }
 
+export const LINT_KINDS = [
+  'orphan',
+  'dangling',
+  'wanted',
+  'ambiguous-wikilink',
+  'source-without-page',
+  'missing-from-index',
+  'stale',
+  'never-verified',
+  'drift',
+] as const
+export type LintKind = (typeof LINT_KINDS)[number]
+
+export interface LintFinding {
+  kind: LintKind
+  pageId?: string
+  title?: string
+  detail: string
+}
+
+export interface LintReport {
+  findings: LintFinding[]
+  counts: Record<string, number>
+}
+
 export interface WikiLogRow {
   op: string
   refId: string | null

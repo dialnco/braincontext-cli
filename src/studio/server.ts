@@ -107,7 +107,7 @@ export function buildStudioApp(provider: StoreProvider, opts: StudioAppOpts): Ho
   })
 
   // --- read/write JSON API (same-origin) ---
-  app.route('/api', healthRoutes())
+  app.route('/api', healthRoutes(provider))
   app.route('/api', projectsRoutes(provider))
   app.route('/api/contexts', contextsRoutes(provider))
   app.route('/api/wiki', wikiRoutes(provider))

@@ -28,6 +28,11 @@ Preferred workflow: build a linked knowledge wiki with the wiki_* tools for dura
 interlinked knowledge; use the context tools (search/get/list/create/update/delete_context)
 for individual entries. Wiki pages are deliberately hidden from the plain context tools.
 
+Read progressively to protect your context window: wiki_search returns compact hits
+(snippet + tokenEstimate, no bodies) → wiki_get {detail:"peek"} for outline/excerpt/links/cost
+→ wiki_get full (optionally maxTokens) only for pages you will actually use. After checking
+a page against reality, mark it with wiki_verify so freshness tracking stays honest.
+
 Concurrency is safe by default: multiple agents/sessions/devices can read and write the
 same store at once. Writes are serialized and conflict-free; concurrent edits to different
 entries merge, and edits to the same entry are last-writer-wins with prior values kept in

@@ -8,16 +8,23 @@ import {
   backlinks,
   createPage,
   getPage,
+  ingestStatus,
   lint,
   listPages,
   outboundLinks,
+  pageFreshness,
+  pagePeek,
   recordSource,
   removeLink,
   resolvePageRef,
   searchPages,
   updatePage,
+  verifyPage,
   wikiGraph,
 } from '../core/wiki'
+import { truncateAtTokens } from '../lib/outline'
+import { estimateTokens, formatTokens } from '../lib/tokens'
+import { driftFindings, snapshotSourceHashes } from '../wiki/drift'
 
 function ok(value: unknown) {
   return { content: [{ type: 'text' as const, text: JSON.stringify(value, null, 2) }] }
@@ -36,7 +43,7 @@ export function registerWikiTools(server: McpServer, db: Kysely<Database>): void
     {
       title: 'Search wiki',
       description:
-        'Full-text search (FTS5/BM25) across wiki pages. After synthesizing a worthwhile answer, file it back so the exploration compounds: prefer wiki_update on the most relevant existing page, or wiki_new {type:"analysis"} when there is no home for it yet.',
+        'Full-text search (FTS5/BM25) across wiki pages. Returns compact hits — snippet + tokenEstimate, no bodies — so results are cheap: follow up with wiki_get {detail:"peek"} on promising hits, then fetch full only the pages you will actually use. After synthesizing a worthwhile answer, file it back so the exploration compounds: prefer wiki_update on the most relevant existing page, or wiki_new {type:"analysis"} when there is no home for it yet.',
       inputSchema: {
         query: z.string(),
         type: z.enum(AUTHORED_PAGE_TYPES).optional(),
@@ -44,8 +51,21 @@ export function registerWikiTools(server: McpServer, db: Kysely<Database>): void
         limit: z.number().int().positive().optional(),
       },
     },
-    async ({ query, type, namespace, limit }) =>
-      ok(await searchPages(db, query, { pageType: type, namespace, limit })),
+    async ({ query, type, namespace, limit }) => {
+      const hits = await searchPages(db, query, { pageType: type, namespace, limit })
+      return ok(
+        hits.map((p) => ({
+          id: p.id,
+          slug: p.slug,
+          title: p.title,
+          pageType: p.pageType,
+          tags: p.tags,
+          tokenEstimate: estimateTokens(p.body),
+          snippet: p.snippet ?? null,
+          updatedAt: p.updatedAt,
+        })),
+      )
+    },
   )
 
   server.registerTool(
@@ -53,17 +73,46 @@ export function registerWikiTools(server: McpServer, db: Kysely<Database>): void
     {
       title: 'Get wiki page',
       description:
-        'Fetch a wiki page (by id, slug, or title) with its outbound links and backlinks.',
-      inputSchema: { ref: z.string().describe('page id, slug, or title') },
+        'Fetch a wiki page (by id, slug, or title). detail:"peek" returns outline + excerpt + links + token cost instead of the body — use it to decide whether the full page is worth its tokenEstimate. maxTokens truncates a full body at a paragraph boundary.',
+      inputSchema: {
+        ref: z.string().describe('page id, slug, or title'),
+        detail: z
+          .enum(['peek', 'full'])
+          .default('full')
+          .describe('peek = outline/excerpt/links/cost only (no body)'),
+        maxTokens: z
+          .number()
+          .int()
+          .positive()
+          .optional()
+          .describe('truncate the body to ~this many tokens (detail:"full" only)'),
+      },
     },
-    async ({ ref }) => {
+    async ({ ref, detail, maxTokens }) => {
       const page = await resolveRef(db, ref)
       if (!page) return fail(`No wiki page matching "${ref}"`)
+      if (detail === 'peek') {
+        const peek = await pagePeek(db, page.id)
+        return peek ? ok(peek) : fail(`No wiki page matching "${ref}"`)
+      }
       const [outbound, back] = await Promise.all([
         outboundLinks(db, page.id),
         backlinks(db, page.id),
       ])
-      return ok({ page, outbound, backlinks: back })
+      let body = page.body
+      if (maxTokens) {
+        const t = truncateAtTokens(page.body, maxTokens)
+        if (t.truncated) {
+          body = `${t.text}\n\n[truncated at ~${t.returnedTokens} of ~${t.totalTokens} tokens — call wiki_get without maxTokens for the rest]`
+        }
+      }
+      return ok({
+        page: { ...page, body },
+        tokenEstimate: estimateTokens(page.body),
+        freshness: pageFreshness(page),
+        outbound,
+        backlinks: back,
+      })
     },
   )
 
@@ -71,19 +120,32 @@ export function registerWikiTools(server: McpServer, db: Kysely<Database>): void
     'wiki_new',
     {
       title: 'Create wiki page',
-      description: 'Create a wiki page. Use [[Title]] in the body to cross-link other pages.',
+      description:
+        'Create a wiki page. Use [[Title]] in the body to cross-link other pages. Declare the source files the page documents via `sources` so agents can find the relevant files and drift can be detected.',
       inputSchema: {
         title: z.string(),
         type: z.enum(AUTHORED_PAGE_TYPES),
         body: z.string().optional(),
         namespace: z.string().optional(),
         tags: z.array(z.string()).optional(),
+        sources: z
+          .array(z.string())
+          .optional()
+          .describe('repo-relative source files this page documents'),
         agent: z.string().optional(),
       },
     },
-    async ({ title, type, body, namespace, tags, agent }) =>
+    async ({ title, type, body, namespace, tags, sources, agent }) =>
       ok(
-        await createPage(db, { title, pageType: type, body, namespace, tags, agentSource: agent }),
+        await createPage(db, {
+          title,
+          pageType: type,
+          body,
+          namespace,
+          tags,
+          agentSource: agent,
+          metadata: sources && sources.length > 0 ? { sources } : undefined,
+        }),
       ),
   )
 
@@ -99,10 +161,14 @@ export function registerWikiTools(server: McpServer, db: Kysely<Database>): void
         body: z.string().optional(),
         addTags: z.array(z.string()).optional(),
         removeTags: z.array(z.string()).optional(),
+        sources: z
+          .array(z.string())
+          .optional()
+          .describe('replace the repo-relative source files this page documents'),
         agent: z.string().optional(),
       },
     },
-    async ({ ref, title, body, addTags, removeTags, agent }) => {
+    async ({ ref, title, body, addTags, removeTags, sources, agent }) => {
       const page = await resolveRef(db, ref)
       if (!page) return fail(`No wiki page matching "${ref}"`)
       try {
@@ -111,6 +177,7 @@ export function registerWikiTools(server: McpServer, db: Kysely<Database>): void
           body,
           addTags,
           removeTags,
+          setMetadata: sources !== undefined ? { sources } : undefined,
           agentSource: agent,
         })
         return updated ? ok(updated) : fail(`No wiki page matching "${ref}"`)
@@ -188,8 +255,57 @@ export function registerWikiTools(server: McpServer, db: Kysely<Database>): void
           'Update ~5–15 related entity/concept pages with wiki_update (edit in place — do NOT create duplicates), weaving in [[links]]; reconcile any contradictions',
           'Refresh the catalog so it reflects the new/updated pages (bctx wiki index --out index.md)',
           'Run wiki_lint to check health (orphans, dangling/wanted links, contradictions, data gaps)',
+          'Verify the pages you touched: wiki_verify {ref} — keeps freshness tracking honest',
         ],
       })
+    },
+  )
+
+  server.registerTool(
+    'wiki_ingest_status',
+    {
+      title: 'Ingest synthesis status',
+      description:
+        'Report how far the post-ingest synthesis got for a source (summary written? related pages updated? index refreshed? verified?). Derived from the graph, so it is resumable across sessions — run it to pick up an interrupted ingest where it left off.',
+      inputSchema: { ref: z.string().describe('source page id, slug, or title') },
+    },
+    async ({ ref }) => {
+      const page = await resolveRef(db, ref)
+      const status = page ? await ingestStatus(db, page.id) : null
+      return status ? ok(status) : fail(`No source page matching "${ref}"`)
+    },
+  )
+
+  server.registerTool(
+    'wiki_verify',
+    {
+      title: 'Verify wiki page',
+      description:
+        'Mark a page as verified — you have just confirmed its content is still accurate. Pages not verified or updated within the stale window (default 45 days) surface as stale/never-verified in wiki_lint. Run after checking or refreshing a page.',
+      inputSchema: {
+        ref: z.string().describe('page id, slug, or title'),
+        agent: z.string().optional(),
+      },
+    },
+    async ({ ref, agent }) => {
+      const page = await resolveRef(db, ref)
+      if (!page) return fail(`No wiki page matching "${ref}"`)
+      try {
+        const updated = await verifyPage(db, page.id, { agent })
+        if (!updated) return fail(`No wiki page matching "${ref}"`)
+        // Baseline declared source files for drift detection. Paths resolve against
+        // the MCP server's working directory (normally the project root).
+        const sourceHashes = await snapshotSourceHashes(db, updated.id, process.cwd())
+        return ok({
+          id: updated.id,
+          title: updated.title,
+          freshness: pageFreshness(updated),
+          sourceHashes,
+        })
+      } catch (e) {
+        // verifyPage throws on source pages ('source pages are immutable').
+        return fail((e as Error).message)
+      }
     },
   )
 
@@ -198,10 +314,29 @@ export function registerWikiTools(server: McpServer, db: Kysely<Database>): void
     {
       title: 'Lint the wiki',
       description:
-        'Report wiki health issues (orphans, dangling/wanted links, ambiguous titles, ...).',
-      inputSchema: {},
+        'Report wiki health issues (orphans, dangling/wanted links, ambiguous titles, stale/never-verified pages, ...). With drift:true, also flags pages whose declared source files changed since their last verify (paths resolve against the server working directory).',
+      inputSchema: {
+        staleDays: z
+          .number()
+          .int()
+          .positive()
+          .optional()
+          .describe('stale window in days (default 45)'),
+        drift: z
+          .boolean()
+          .optional()
+          .describe('also check declared source files for code↔doc drift'),
+      },
     },
-    async () => ok(await lint(db)),
+    async ({ staleDays, drift }) => {
+      const report = await lint(db, { staleDays })
+      if (drift) {
+        const findings = await driftFindings(db, process.cwd())
+        report.findings.push(...findings)
+        if (findings.length > 0) report.counts.drift = findings.length
+      }
+      return ok(report)
+    },
   )
 
   server.registerTool(
@@ -209,10 +344,25 @@ export function registerWikiTools(server: McpServer, db: Kysely<Database>): void
     {
       title: 'Wiki graph',
       description:
-        'Return the wiki link graph — pages (nodes, with degree) and their typed edges — for navigation and overview. Optionally scope to a namespace.',
-      inputSchema: { namespace: z.string().optional() },
+        'Return the wiki link graph — pages (nodes, with degree) and their typed edges — for navigation and overview. Optionally scope to a namespace; on large wikis use minDegree/limit to get the well-connected core instead of thousands of nodes.',
+      inputSchema: {
+        namespace: z.string().optional(),
+        minDegree: z
+          .number()
+          .int()
+          .nonnegative()
+          .optional()
+          .describe('drop nodes with fewer connections than this'),
+        limit: z
+          .number()
+          .int()
+          .positive()
+          .optional()
+          .describe('keep only the N best-connected nodes'),
+      },
     },
-    async ({ namespace }) => ok(await wikiGraph(db, { namespace })),
+    async ({ namespace, minDegree, limit }) =>
+      ok(await wikiGraph(db, { namespace, minDegree, limit })),
   )
 
   server.registerResource(
@@ -224,7 +374,7 @@ export function registerWikiTools(server: McpServer, db: Kysely<Database>): void
           resources: pages.map((p) => ({
             uri: `bctx://wiki/${p.id}`,
             name: p.title ?? p.id,
-            description: String(p.pageType),
+            description: `${p.pageType} · ${formatTokens(estimateTokens(p.body))}`,
             mimeType: 'application/json',
           })),
         }

@@ -8,6 +8,8 @@ export interface Autosave {
   schedule: (value: string) => void
   /** Persist immediately if dirty (call on blur / navigate / project switch). */
   flush: () => Promise<void>
+  /** Race-free dirty probe (state lags a render; the ref does not). */
+  isDirty: () => boolean
 }
 
 /**
@@ -60,6 +62,8 @@ export function useAutosave(save: (value: string) => Promise<void>, delayMs = 10
     await doSave()
   }, [doSave])
 
+  const isDirty = useCallback(() => pending.current !== null, [])
+
   // Flush on tab close / refresh. A fire-and-forget fetch is not awaited by the browser
   // on unload, so ALSO trigger the native "unsaved changes" prompt whenever the buffer is
   // dirty — that turns a silent loss into a user choice (stay → the in-flight save or the
@@ -76,5 +80,5 @@ export function useAutosave(save: (value: string) => Promise<void>, delayMs = 10
     return () => window.removeEventListener('beforeunload', onBeforeUnload)
   }, [doSave])
 
-  return { status, schedule, flush }
+  return { status, schedule, flush, isDirty }
 }

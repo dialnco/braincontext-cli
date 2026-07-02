@@ -1,6 +1,6 @@
 import { Hono } from 'hono'
 import { z } from 'zod'
-import { deleteContext } from '../../core/contexts'
+import { deleteContext, listHistory } from '../../core/contexts'
 import { AUTHORED_PAGE_TYPES, LINK_TYPES, PAGE_TYPES } from '../../core/types'
 import {
   addLink,
@@ -8,12 +8,14 @@ import {
   createPage,
   getPage,
   getPageByTitle,
+  lint,
   listLog,
   listPages,
   outboundLinks,
   removeLink,
   searchPages,
   updatePage,
+  verifyPage,
   wikiGraph,
 } from '../../core/wiki'
 import { intQuery, readJson, strQuery } from '../http'
@@ -98,12 +100,32 @@ export function wikiRoutes(provider: StoreProvider): Hono {
     }
   })
 
+  // Goes through core verifyPage (not a bare metadata PATCH) so the op log records it.
+  app.post('/pages/:id/verify', async (c) => {
+    try {
+      const updated = await verifyPage(provider.db(), c.req.param('id'), { agent: 'studio' })
+      return updated ? c.json(updated) : c.json({ error: 'not found' }, 404)
+    } catch (e) {
+      const msg = (e as Error).message
+      if (/immutable/i.test(msg)) return c.json({ error: msg }, 409)
+      return c.json({ error: 'verify failed' }, 500)
+    }
+  })
+
   app.delete('/pages/:id', async (c) => {
     const page = await getPage(provider.db(), c.req.param('id'))
     if (!page) return c.json({ error: 'not found' }, 404)
     const hard = c.req.query('hard') === '1' || c.req.query('hard') === 'true'
     const ok = await deleteContext(provider.db(), page.id, { hard })
     return c.json({ deleted: ok })
+  })
+
+  // Audit trail for a wiki page. Wiki pages are firewalled out of the by-id
+  // /api/contexts surfaces, so history needs its own wiki-scoped route.
+  app.get('/pages/:id/history', async (c) => {
+    const page = await getPage(provider.db(), c.req.param('id'))
+    if (!page) return c.json({ error: 'not found' }, 404)
+    return c.json(await listHistory(provider.db(), page.id, intQuery(c, 'limit') ?? 50))
   })
 
   // --- links / backlinks / graph ---
@@ -143,6 +165,11 @@ export function wikiRoutes(provider: StoreProvider): Hono {
   })
 
   app.get('/log', async (c) => c.json(await listLog(provider.db(), { limit: intQuery(c, 'tail') })))
+
+  // --- health ---
+  app.get('/lint', async (c) =>
+    c.json(await lint(provider.db(), { staleDays: intQuery(c, 'staleDays') })),
+  )
 
   return app
 }

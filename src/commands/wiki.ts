@@ -9,19 +9,26 @@ import {
   appendLog,
   backlinks,
   createPage,
+  ingestStatus,
   lint,
   listLog,
   listPages,
   outboundLinks,
+  pageFreshness,
+  pagePeek,
   recordSource,
   removeLink,
   resolvePageRef,
   searchPages,
   updatePage,
+  verifyPage,
 } from '../core/wiki'
 import { resolveAgent } from '../lib/agent'
 import { formatList } from '../lib/format'
+import { truncateAtTokens } from '../lib/outline'
 import { resolveBody } from '../lib/stdin'
+import { estimateTokens, formatTokens } from '../lib/tokens'
+import { driftFindings, snapshotSourceHashes } from '../wiki/drift'
 import { exportWiki, renderIndexMarkdown } from '../wiki/export'
 import { importWiki } from '../wiki/import'
 import { collect, dbOptsFrom, parsePositiveInt, splitCsv } from './_shared'
@@ -36,6 +43,13 @@ function printPage(
   console.log(`${page.id}  [${page.pageType}]  ${page.title ?? page.slug}`)
   if (page.slug) console.log(`  slug: ${page.slug}`)
   console.log(`  namespace: ${page.namespace}  updated: ${page.updatedAt}`)
+  if (page.pageType !== 'source' && page.pageType !== 'index') {
+    const f = pageFreshness(page)
+    const by = f.verifiedBy ? ` by ${f.verifiedBy}` : ''
+    console.log(
+      `  freshness: ${f.state} (${f.verifiedAt ? 'verified' : 'updated'} ${f.ageDays}d ago${by})  ${formatTokens(estimateTokens(page.body))}`,
+    )
+  }
   if (out.outbound.length > 0) {
     console.log('  links →')
     for (const l of out.outbound)
@@ -62,11 +76,13 @@ export function wikiCommand(): Command {
     .option('--file <path>', 'read body from a file (- for stdin)')
     .option('--namespace <ns>', 'wiki namespace', 'wiki')
     .option('--tags <a,b,c>', 'comma-separated tags')
+    .option('--sources <a,b,c>', 'repo-relative source files this page documents (drift tracking)')
     .option('--agent <name>', 'agent source label')
     .option('--json', 'output JSON')
     .action(async (title: string, opts, command: Command) => {
       const pageType = z.enum(AUTHORED_PAGE_TYPES).parse(opts.type)
       const body = opts.body ?? (await resolveBody(opts.file, []))
+      const sources = splitCsv(opts.sources)
       const page = await withDb(dbOptsFrom(command), (db) =>
         createPage(db, {
           title,
@@ -75,6 +91,7 @@ export function wikiCommand(): Command {
           namespace: opts.namespace,
           tags: splitCsv(opts.tags),
           agentSource: resolveAgent(opts.agent),
+          metadata: sources && sources.length > 0 ? { sources } : undefined,
         }),
       )
       console.log(
@@ -86,16 +103,101 @@ export function wikiCommand(): Command {
 
   wiki
     .command('get <ref>')
-    .description('Fetch a page by id, slug, or title.')
+    .description(
+      'Fetch a page by id, slug, or title. Use --peek to preview outline/excerpt/cost before spending tokens on the full body.',
+    )
+    .option('--peek', 'summary view: outline + excerpt + links + token cost (no full body)')
+    .option('--max-tokens <n>', 'truncate the body to ~N tokens (at a paragraph boundary)')
     .option('--json', 'output JSON')
     .action(async (ref: string, opts, command: Command) => {
-      const page = await withDb(dbOptsFrom(command), (db) => resolvePageRef(db, ref))
-      if (!page) {
+      const maxTokens = parsePositiveInt(opts.maxTokens, '--max-tokens')
+      await withDb(dbOptsFrom(command), async (db) => {
+        const page = await resolvePageRef(db, ref)
+        if (!page) {
+          console.error(`No wiki page matching "${ref}".`)
+          process.exitCode = 1
+          return
+        }
+        if (opts.peek) {
+          const peek = await pagePeek(db, page.id)
+          if (!peek) {
+            console.error(`No wiki page matching "${ref}".`)
+            process.exitCode = 1
+            return
+          }
+          if (opts.json) {
+            console.log(JSON.stringify(peek, null, 2))
+            return
+          }
+          console.log(`${peek.id}  [${peek.pageType}]  ${peek.title ?? peek.slug}`)
+          console.log(
+            `  full body: ${formatTokens(peek.tokenEstimate)}  freshness: ${peek.freshness.state} (${peek.freshness.ageDays}d)`,
+          )
+          if (peek.tags.length > 0) console.log(`  tags: ${peek.tags.join(', ')}`)
+          if (peek.outline.length > 0) {
+            console.log('  outline:')
+            for (const h of peek.outline) console.log(`    · ${h}`)
+          }
+          console.log(`  links: ${peek.links.length} out · ${peek.backlinks.length} in`)
+          if (peek.excerpt) console.log(`\n${peek.excerpt}`)
+          return
+        }
+        let body = page.body
+        if (maxTokens) {
+          const t = truncateAtTokens(page.body, maxTokens)
+          if (t.truncated) {
+            body = `${t.text}\n\n[truncated at ~${t.returnedTokens} of ~${t.totalTokens} tokens — rerun without --max-tokens for the rest]`
+          }
+        }
+        console.log(opts.json ? JSON.stringify({ ...page, body }, null, 2) : body)
+      })
+    })
+
+  wiki
+    .command('verify <ref>')
+    .description(
+      'Mark a page as verified (its content was just checked against reality). Unverified/old pages surface as stale in `wiki lint`.',
+    )
+    .option('--agent <name>', 'agent source label')
+    .option('--json', 'output JSON')
+    .action(async (ref: string, opts, command: Command) => {
+      const result = await withDb(dbOptsFrom(command), async (db) => {
+        const target = await resolvePageRef(db, ref)
+        if (!target) return null
+        const page = await verifyPage(db, target.id, { agent: resolveAgent(opts.agent) })
+        if (!page) return null
+        // Baseline the declared source files so `wiki lint --drift` can tell when
+        // the code this page documents changes out from under it.
+        const hashes = await snapshotSourceHashes(db, page.id, process.cwd())
+        return { page, hashes }
+      })
+      if (!result) {
         console.error(`No wiki page matching "${ref}".`)
         process.exitCode = 1
         return
       }
-      console.log(opts.json ? JSON.stringify(page, null, 2) : page.body)
+      const f = pageFreshness(result.page)
+      if (opts.json) {
+        console.log(
+          JSON.stringify(
+            {
+              id: result.page.id,
+              title: result.page.title,
+              freshness: f,
+              sourceHashes: result.hashes,
+            },
+            null,
+            2,
+          ),
+        )
+        return
+      }
+      console.log(`Verified "${result.page.title}" (${result.page.id}) at ${f.verifiedAt}`)
+      if (result.hashes) {
+        const missing = Object.entries(result.hashes).filter(([, h]) => h === null)
+        console.log(`Snapshotted ${Object.keys(result.hashes).length} source hash(es).`)
+        for (const [path] of missing) console.log(`  ! ${path} not found (recorded as missing)`)
+      }
     })
 
   wiki
@@ -109,6 +211,7 @@ export function wikiCommand(): Command {
     .option('--file <path>', 'set the body from a file (use - for stdin)')
     .option('--add-tag <tag>', 'add a tag (repeatable)', collect, [])
     .option('--rm-tag <tag>', 'remove a tag (repeatable)', collect, [])
+    .option('--sources <a,b,c>', 'replace the source files this page documents (drift tracking)')
     .option('--agent <name>', 'agent source label for this change')
     .option('--json', 'output JSON')
     .action(async (ref: string, opts, command: Command) => {
@@ -123,9 +226,12 @@ export function wikiCommand(): Command {
       }
       if (opts.addTag.length > 0) patch.addTags = opts.addTag
       if (opts.rmTag.length > 0) patch.removeTags = opts.rmTag
+      if (opts.sources !== undefined) patch.setMetadata = { sources: splitCsv(opts.sources) ?? [] }
       if (opts.agent) patch.agentSource = resolveAgent(opts.agent)
       if (Object.keys(patch).length === 0) {
-        throw new Error('Nothing to update. Pass --title, --body/--file, --add-tag, or --rm-tag.')
+        throw new Error(
+          'Nothing to update. Pass --title, --body/--file, --add-tag, --rm-tag, or --sources.',
+        )
       }
 
       const page = await withDb(dbOptsFrom(command), async (db) => {
@@ -272,10 +378,16 @@ export function wikiCommand(): Command {
     .description('Render the wiki catalog (by page type) to a file or stdout.')
     .option('--out <file>', 'write to a file instead of stdout')
     .option('--namespace <ns>', 'restrict to a namespace')
+    .option(
+      '--budget <tokens>',
+      'cap the catalog at ~N tokens (drops sources first, then largest pages; omissions are stated)',
+    )
     .action(async (opts, command: Command) => {
       await withDb(dbOptsFrom(command), async (db) => {
         const pages = await listPages(db, { namespace: opts.namespace, limit: 100000 })
-        const md = renderIndexMarkdown(pages)
+        const md = renderIndexMarkdown(pages, {
+          budget: parsePositiveInt(opts.budget, '--budget'),
+        })
         if (opts.out) {
           const { writeFileSync } = await import('node:fs')
           writeFileSync(resolve(opts.out), md, 'utf8')
@@ -308,13 +420,39 @@ export function wikiCommand(): Command {
   wiki
     .command('ingest <source>')
     .description(
-      'Store a raw source (immutable) + log it, then print a synthesis checklist for the agent.',
+      'Store a raw source (immutable) + log it, then print a synthesis checklist for the agent. With --status, treat <source> as a page ref and report how far the synthesis got (derived from the graph — resumable across sessions).',
     )
     .option('--title <title>', 'source title')
     .option('--uri <uri>', 'source URI / path of record')
+    .option('--status', 'report synthesis progress for an already-ingested source')
     .option('--agent <name>', 'agent source label')
     .option('--json', 'output JSON')
     .action(async (source: string, opts, command: Command) => {
+      if (opts.status) {
+        const status = await withDb(dbOptsFrom(command), async (db) => {
+          const target = await resolvePageRef(db, source)
+          return target ? ingestStatus(db, target.id) : null
+        })
+        if (!status) {
+          console.error(`No source page matching "${source}".`)
+          process.exitCode = 1
+          return
+        }
+        if (opts.json) {
+          console.log(JSON.stringify(status, null, 2))
+          return
+        }
+        console.log(`Source "${status.title}" (${status.sourceId}) ingested ${status.ingestedAt}`)
+        for (const s of status.steps) {
+          console.log(`  ${s.done ? '✓' : '·'} ${s.step}: ${s.detail}`)
+        }
+        console.log(
+          status.complete
+            ? 'Synthesis complete.'
+            : 'Synthesis incomplete — see pending steps above.',
+        )
+        return
+      }
       const body = await resolveBody(source, [])
       if (!body.trim()) {
         console.error('Empty source.')
@@ -350,14 +488,27 @@ export function wikiCommand(): Command {
       console.log('  3. Update ~5–15 related entity/concept pages, weaving in [[links]].')
       console.log('  4. Refresh the catalog:    bctx wiki index --out index.md')
       console.log('  5. Review health:          bctx wiki lint')
+      console.log('  6. Verify touched pages:   bctx wiki verify "<ref>"')
     })
 
   wiki
     .command('lint')
-    .description('Report wiki health issues (orphans, dangling/wanted links, ...).')
+    .description(
+      'Report wiki health issues (orphans, dangling/wanted links, stale/never-verified pages, ...).',
+    )
+    .option('--stale-days <n>', 'stale window in days (default 45)')
+    .option('--drift', 'also check pages whose declared source files changed (paths vs cwd)')
     .option('--json', 'output JSON')
     .action(async (opts, command: Command) => {
-      const report = await withDb(dbOptsFrom(command), (db) => lint(db))
+      const report = await withDb(dbOptsFrom(command), async (db) => {
+        const r = await lint(db, { staleDays: parsePositiveInt(opts.staleDays, '--stale-days') })
+        if (opts.drift) {
+          const drift = await driftFindings(db, process.cwd())
+          r.findings.push(...drift)
+          if (drift.length > 0) r.counts.drift = drift.length
+        }
+        return r
+      })
       if (opts.json) {
         console.log(JSON.stringify(report, null, 2))
         return

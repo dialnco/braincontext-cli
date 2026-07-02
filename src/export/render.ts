@@ -26,7 +26,8 @@ This repo has a **braincontext** store (\`bctx\`) — durable, shared context fo
 Use it so knowledge compounds instead of being re-learned each session:
 
 - **Retrieve first** (before answering): \`bctx wiki search "<topic>"\` · \`bctx search "<topic>"\` — MCP: \`wiki_search\`, \`search_contexts\`.
-- **Save durable facts** (rules, decisions, gotchas): \`bctx wiki new\`/\`bctx wiki update\` for linked knowledge, or \`bctx add --kind rule|decision|note\`.
+- **Disclose progressively:** search → \`bctx wiki get "<ref>" --peek\` (outline · excerpt · ~tokens) → full page only for what you'll use — MCP: \`wiki_get {detail:"peek"}\`.
+- **Save durable facts** (rules, decisions, gotchas): \`bctx wiki new\`/\`bctx wiki update\` for linked knowledge, or \`bctx add --kind rule|decision|note\`; verify checked pages with \`bctx wiki verify\`.
 - **Native access:** run \`bctx mcp\` · playbook: \`bctx skills get braincontext\`.`
 
 /** Markdown that goes INSIDE the AGENTS.md managed fence (preamble + sections by kind). */

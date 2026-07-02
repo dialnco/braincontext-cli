@@ -1,6 +1,6 @@
 import type React from 'react'
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react'
-import { ApiError } from '../api/client'
+import { ApiError, api } from '../api/client'
 import { projectsApi } from '../api/projects'
 import type { ProjectInfo, ProjectStatus } from '../api/types'
 import type { ThemeName } from '../lib/theme'
@@ -18,6 +18,11 @@ interface AppState {
    * pending edits before the store swaps under it. Pass null on unmount.
    */
   registerFlush: (fn: (() => Promise<void>) | null) => void
+  /**
+   * Register the active editor's dirty probe so the live-refresh poller pauses while
+   * an edit is pending (a refetch mid-edit could clobber typing). Pass null on unmount.
+   */
+  registerDirty: (fn: (() => boolean) | null) => void
   /** Global revision counter; components key data fetches on it to refetch after writes. */
   rev: number
   bump: () => void
@@ -51,6 +56,11 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
   const flushRef = useRef<(() => Promise<void>) | null>(null)
   const registerFlush = useCallback((fn: (() => Promise<void>) | null) => {
     flushRef.current = fn
+  }, [])
+
+  const dirtyRef = useRef<(() => boolean) | null>(null)
+  const registerDirty = useCallback((fn: (() => boolean) | null) => {
+    dirtyRef.current = fn
   }, [])
 
   const bump = useCallback(() => setRev((r) => r + 1), [])
@@ -106,6 +116,31 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
     refreshProjects()
   }, [refreshProjects])
 
+  // Live refresh: poll the store's data_version so writes from OTHER connections
+  // (agents via MCP, the CLI) show up without a manual reload. Any change means
+  // "maybe modified" (the counter is per-connection; magnitude is meaningless).
+  // Paused while the tab is hidden and while the editor holds unsaved edits —
+  // a refetch mid-edit could clobber typing; the next tick catches up.
+  useEffect(() => {
+    let last: number | null = null
+    let inFlight = false
+    const id = window.setInterval(async () => {
+      if (document.hidden || inFlight) return
+      if (dirtyRef.current?.()) return
+      inFlight = true
+      try {
+        const { dataVersion } = await api.get<{ dataVersion: number }>('/version')
+        if (last !== null && dataVersion !== last) bump()
+        last = dataVersion
+      } catch {
+        last = null // server briefly unavailable (e.g. project switch) — rebaseline
+      } finally {
+        inFlight = false
+      }
+    }, 2500)
+    return () => window.clearInterval(id)
+  }, [bump])
+
   const value = useMemo<AppState>(
     () => ({
       theme,
@@ -116,6 +151,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
       switchProject,
       syncProject,
       registerFlush,
+      registerDirty,
       rev,
       bump,
       toast,
@@ -129,6 +165,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
       switchProject,
       syncProject,
       registerFlush,
+      registerDirty,
       rev,
       bump,
       toast,

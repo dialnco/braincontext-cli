@@ -33,6 +33,14 @@ export const AUTHORED_PAGE_TYPES = [
 ] as const
 
 /**
+ * Page verification lifecycle (the gist's confidence/verification states).
+ * Derived from `metadata.verifiedAt` + `updatedAt`, never stored directly, so a
+ * recorded state can't silently outlive the facts it was computed from.
+ */
+export const VERIFICATION_STATES = ['unverified', 'verified', 'stale'] as const
+export type VerificationState = (typeof VERIFICATION_STATES)[number]
+
+/**
  * User-selectable link relations. The reserved `references` channel
  * (auto-derived from [[..]] in page bodies) is intentionally NOT here, so
  * explicit links never collide with — and get clobbered by — body re-sync.

@@ -5,6 +5,7 @@ import type { Context } from '../core/contexts'
 import { type Database, REFERENCES_LINK } from '../core/types'
 import { listLog, listPages, outboundLinks } from '../core/wiki'
 import { parseFrontmatter, stringifyFrontmatter } from '../lib/frontmatter'
+import { estimateTokens, formatTokens } from '../lib/tokens'
 import { normalizeTitle } from '../lib/wikilinks'
 
 const WIKILINK = /\[\[([^\]]+)\]\]/g
@@ -27,21 +28,62 @@ function firstLine(body: string): string {
     .slice(0, 120)
 }
 
-/** Render the catalog page (grouped by page type) — shared by `wiki index` and export. */
-export function renderIndexMarkdown(pages: Context[]): string {
+/**
+ * Render the catalog page (grouped by page type) — shared by `wiki index` and export.
+ * Every line carries the page's token estimate so an agent can budget which pages
+ * it can afford to open before opening any of them.
+ *
+ * With `budget`, the rendered document itself is capped at ~that many tokens: source
+ * entries are dropped first, then the entries with the largest bodies, and an explicit
+ * "N omitted" line replaces them — a truncated map must never read as a complete one.
+ */
+export function renderIndexMarkdown(pages: Context[], opts: { budget?: number } = {}): string {
   const order = ['entity', 'concept', 'summary', 'comparison', 'analysis', 'source']
-  const lines = ['# Wiki index', '']
-  for (const t of order) {
-    const group = pages.filter((p) => p.pageType === t)
-    if (group.length === 0) continue
-    lines.push(`## ${t}`, '')
-    for (const p of group) {
-      const summary = firstLine(p.body)
-      lines.push(`- [${p.title ?? p.slug}](${p.slug ?? p.id}.md)${summary ? ` — ${summary}` : ''}`)
-    }
-    lines.push('')
+  const total = pages.reduce((n, p) => n + estimateTokens(p.body), 0)
+
+  const entryLine = (p: Context): string => {
+    const summary = firstLine(p.body)
+    const cost = formatTokens(estimateTokens(p.body))
+    return `- [${p.title ?? p.slug}](${p.slug ?? p.id}.md)${summary ? ` — ${summary}` : ''} (${cost})`
   }
-  return `${lines.join('\n').trim()}\n`
+
+  const render = (kept: Set<string>, omitted: number): string => {
+    const lines = ['# Wiki index', '', `${pages.length} page(s) · ${formatTokens(total)} total`, '']
+    for (const t of order) {
+      const group = pages.filter((p) => p.pageType === t && kept.has(p.id))
+      if (group.length === 0) continue
+      lines.push(`## ${t}`, '')
+      for (const p of group) lines.push(entryLine(p))
+      lines.push('')
+    }
+    if (omitted > 0) {
+      lines.push(`_${omitted} page(s) omitted to fit the ~${opts.budget} token budget._`, '')
+    }
+    return `${lines.join('\n').trim()}\n`
+  }
+
+  const kept = new Set(pages.filter((p) => p.pageType !== 'index').map((p) => p.id))
+  if (!opts.budget) return render(kept, 0)
+
+  // Drop order: sources first, then largest bodies — the cheap-to-open pages keep
+  // their place on the map. Recompute arithmetically, render once at the end.
+  const dropOrder = [...pages]
+    .filter((p) => kept.has(p.id))
+    .sort((a, b) => {
+      const aSrc = a.pageType === 'source' ? 0 : 1
+      const bSrc = b.pageType === 'source' ? 0 : 1
+      if (aSrc !== bSrc) return aSrc - bSrc
+      return estimateTokens(b.body) - estimateTokens(a.body)
+    })
+  let cost = estimateTokens(render(kept, 0))
+  let omitted = 0
+  for (const p of dropOrder) {
+    if (cost <= opts.budget) break
+    kept.delete(p.id)
+    cost -= estimateTokens(`${entryLine(p)}\n`)
+    omitted++
+  }
+  return render(kept, omitted)
 }
 
 export interface ExportResult {

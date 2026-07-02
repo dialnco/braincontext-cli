@@ -19,6 +19,7 @@ import {
 import { sx } from '../lib/dc'
 import { htmlToMarkdown, markdownToHtml } from '../lib/markdown'
 import { S } from '../lib/theme'
+import { estimateTokens, formatTokens } from '../lib/tokens'
 import { wlSpan } from '../lib/wikilinks'
 import { type SaveStatus, useAutosave } from '../state/useAutosave'
 
@@ -57,6 +58,8 @@ const CLOSED_MENU: FloatMenu = { open: false, q: '', idx: 0, left: 0, top: 0, ma
 
 export interface WikiEditorHandle {
   flush: () => Promise<void>
+  /** True while an edit is buffered but not yet saved (pauses the live-refresh poller). */
+  isDirty: () => boolean
 }
 
 interface Props {
@@ -109,6 +112,7 @@ export function WikiEditor({
   const [preview, setPreview] = useState<Preview>({ open: false, left: 0, top: 0, page: null })
   const [md, setMd] = useState('')
   const [words, setWords] = useState(0)
+  const [tokens, setTokens] = useState(0)
   const [mdCopied, setMdCopied] = useState(false)
 
   const pagesRef = useRef(pages)
@@ -150,11 +154,16 @@ export function WikiEditor({
 
   const autosave = useAutosave(onSave)
   useEffect(() => {
-    if (handleRef) handleRef.current = { flush: autosave.flush }
-  }, [handleRef, autosave.flush])
+    if (handleRef) handleRef.current = { flush: autosave.flush, isDirty: autosave.isDirty }
+  }, [handleRef, autosave.flush, autosave.isDirty])
   useEffect(() => {
     onSaved?.(autosave.status)
   }, [autosave.status, onSaved])
+
+  // The markdown this editor last loaded or scheduled for save. External writes are
+  // detected by exact string comparison against this — NOT against a re-derived
+  // htmlToMarkdown(innerHTML) round-trip, which may normalize and false-positive.
+  const lastSyncedMd = useRef('')
 
   // Load the page body into the editor when the active page changes.
   // biome-ignore lint/correctness/useExhaustiveDependencies: re-render on page identity + body
@@ -163,9 +172,26 @@ export function WikiEditor({
     if (!ed) return
     ed.innerHTML = markdownToHtml(page.body, resolveTitle)
     ed.scrollTop = 0
+    lastSyncedMd.current = page.body
     setWords((ed.textContent?.trim().match(/\S+/g) || []).length)
+    setTokens(estimateTokens(page.body))
     sizeTables()
   }, [page.id])
+
+  // Reflect EXTERNAL edits to the open page (an agent/CLI wrote it; the live-refresh
+  // poller refetched). Only when the local buffer is clean — a dirty buffer wins and
+  // will be saved (last-writer semantics, same as concurrent CLI edits).
+  // biome-ignore lint/correctness/useExhaustiveDependencies: compare vs lastSyncedMd only
+  useEffect(() => {
+    const ed = edRef.current
+    if (!ed || page.body === lastSyncedMd.current || autosave.isDirty()) return
+    ed.innerHTML = markdownToHtml(page.body, resolveTitle)
+    lastSyncedMd.current = page.body
+    setWords((ed.textContent?.trim().match(/\S+/g) || []).length)
+    setTokens(estimateTokens(page.body))
+    if (dual) setMd(page.body)
+    sizeTables()
+  }, [page.body])
 
   // Sync the dual-pane markdown source when it opens or the page changes. Without
   // this it's only refreshed on edit, so toggling dual on a loaded page is blank.
@@ -180,8 +206,11 @@ export function WikiEditor({
     const ed = edRef.current
     if (!ed) return
     setWords((ed.textContent?.trim().match(/\S+/g) || []).length)
-    autosave.schedule(htmlToMarkdown(ed.innerHTML))
-    if (dual) setMd(htmlToMarkdown(ed.innerHTML))
+    const nextMd = htmlToMarkdown(ed.innerHTML)
+    lastSyncedMd.current = nextMd // our own save echoing back must not read as external
+    setTokens(estimateTokens(nextMd))
+    autosave.schedule(nextMd)
+    if (dual) setMd(nextMd)
   }, [autosave, dual])
 
   // --- wikilink autocomplete ([[) ---
@@ -195,9 +224,20 @@ export function WikiEditor({
       const ql = q.toLowerCase()
       let list = pagesRef.current.filter((p) => p.id !== page.id)
       if (ql) list = list.filter((p) => (p.title ?? '').toLowerCase().includes(ql))
-      const rows: LinkRow[] = list
-        .slice(0, 6)
-        .map((p) => ({ kind: 'page', id: p.id, title: p.title ?? p.id, sub: p.pageType ?? 'page' }))
+      // Titles are the [[link]] resolution key — when several pages share one, show
+      // each candidate's slug so the user can tell which page they are linking.
+      const titleCounts = new Map<string, number>()
+      for (const p of pagesRef.current) {
+        const t = (p.title ?? '').toLowerCase().trim()
+        if (t) titleCounts.set(t, (titleCounts.get(t) ?? 0) + 1)
+      }
+      const rows: LinkRow[] = list.slice(0, 6).map((p) => {
+        const ambiguous = (titleCounts.get((p.title ?? '').toLowerCase().trim()) ?? 0) > 1
+        const sub = ambiguous
+          ? `${p.pageType ?? 'page'} · ${p.slug ?? p.id} — ambiguous title`
+          : (p.pageType ?? 'page')
+        return { kind: 'page', id: p.id, title: p.title ?? p.id, sub }
+      })
       if (ql && !pagesRef.current.find((p) => (p.title ?? '').toLowerCase() === ql)) {
         rows.push({ kind: 'new', id: '', title: q, sub: 'new page' })
       }
@@ -695,6 +735,9 @@ export function WikiEditor({
           >
             <span>{words} words</span>
             <span>{Math.max(1, Math.round(words / 220))} min</span>
+            <span title="Estimated cost for an agent to read this page">
+              {formatTokens(tokens)}
+            </span>
             <span style={sx('flex:1;')} />
             <SaveBadge status={autosave.status} />
           </div>

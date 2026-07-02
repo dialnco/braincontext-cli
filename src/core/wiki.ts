@@ -1,16 +1,19 @@
 import type { Kysely } from 'kysely'
+import { extractExcerpt, extractOutline } from '../lib/outline'
+import { estimateTokens } from '../lib/tokens'
 import { normalizeTitle, parseWikiLinks, slugify } from '../lib/wikilinks'
 import {
   type Context,
   createContext,
   getContext,
   listContexts,
+  parseMetadata,
   searchContexts,
   type UpdateInput,
   updateContext,
 } from './contexts'
 import { withWriteRetry } from './tx'
-import { type Database, type PageType, REFERENCES_LINK } from './types'
+import { type Database, type PageType, REFERENCES_LINK, type VerificationState } from './types'
 
 function nowIso(): string {
   return new Date().toISOString()
@@ -266,6 +269,127 @@ export async function searchPages(
 }
 
 // ---------------------------------------------------------------------------
+// Freshness / verification (the gist's confidence states)
+// ---------------------------------------------------------------------------
+
+/** Pages not verified or updated within this many days count as stale. */
+export const DEFAULT_STALE_DAYS = 45
+
+export interface PageFreshness {
+  state: VerificationState
+  /** Days since last verification (or last update when never verified). */
+  ageDays: number
+  verifiedAt: string | null
+  verifiedBy: string | null
+}
+
+/**
+ * Derive a page's freshness from `metadata.verifiedAt`/`verifiedBy` + `updatedAt`.
+ * The state is always computed, never stored, so it can't outlive its inputs.
+ * Age counts from the most recent of (verifiedAt, updatedAt), so a fresh edit is
+ * never "stale"; a verification only counts while no later edit invalidated it
+ * (small tolerance — verifyPage stamps both within the same write).
+ */
+export function pageFreshness(
+  page: Pick<Context, 'metadata' | 'updatedAt'>,
+  opts: { staleDays?: number; now?: Date } = {},
+): PageFreshness {
+  const staleDays = opts.staleDays ?? DEFAULT_STALE_DAYS
+  const verifiedAt = typeof page.metadata.verifiedAt === 'string' ? page.metadata.verifiedAt : null
+  const verifiedBy = typeof page.metadata.verifiedBy === 'string' ? page.metadata.verifiedBy : null
+  const verifiedMs = verifiedAt ? new Date(verifiedAt).getTime() : Number.NEGATIVE_INFINITY
+  const updatedMs = new Date(page.updatedAt).getTime()
+  const now = opts.now ?? new Date()
+  const ageDays = Math.max(
+    0,
+    Math.floor((now.getTime() - Math.max(verifiedMs, updatedMs)) / 86_400_000),
+  )
+  const verifiedCurrent = verifiedAt !== null && verifiedMs >= updatedMs - 5000
+  const state: VerificationState =
+    ageDays > staleDays ? 'stale' : verifiedCurrent ? 'verified' : 'unverified'
+  return { state, ageDays, verifiedAt, verifiedBy }
+}
+
+/** Mark a page as verified now. Throws on `source` pages (immutable, never stale). */
+export async function verifyPage(
+  db: Kysely<Database>,
+  id: string,
+  opts: { agent?: string | null } = {},
+): Promise<Context | null> {
+  const page = await getPage(db, id)
+  if (!page) return null
+  const updated = await updatePage(db, id, {
+    setMetadata: { verifiedAt: nowIso(), verifiedBy: opts.agent ?? null },
+    agentSource: opts.agent ?? undefined,
+  })
+  if (updated) {
+    await appendLog(db, {
+      op: 'verify',
+      refId: id,
+      title: page.title,
+      agentSource: opts.agent ?? null,
+    })
+  }
+  return updated
+}
+
+// ---------------------------------------------------------------------------
+// Peek (the middle rung of the disclosure ladder: index line -> peek -> full)
+// ---------------------------------------------------------------------------
+
+export interface PagePeek {
+  id: string
+  slug: string | null
+  title: string | null
+  pageType: string | null
+  namespace: string
+  tags: string[]
+  /** What fetching the full body would cost (~chars/4). */
+  tokenEstimate: number
+  /** Section headings (## / ###) in document order. */
+  outline: string[]
+  /** Leading ~400 chars of the body, [[wikilinks]] intact. */
+  excerpt: string
+  /** Source-code files this page documents (metadata.sources) — "the relevant files". */
+  sources: string[]
+  links: Array<{ type: string; title: string | null; wanted: boolean }>
+  backlinks: Array<{ type: string; title: string | null }>
+  createdAt: string
+  updatedAt: string
+  freshness: PageFreshness
+}
+
+/** A budget-friendly summary of a page: enough to decide whether to fetch the body. */
+export async function pagePeek(
+  db: Kysely<Database>,
+  id: string,
+  opts: { staleDays?: number } = {},
+): Promise<PagePeek | null> {
+  const page = await getPage(db, id)
+  if (!page || page.deletedAt) return null
+  const [outbound, back] = await Promise.all([outboundLinks(db, page.id), backlinks(db, page.id)])
+  return {
+    id: page.id,
+    slug: page.slug,
+    title: page.title,
+    pageType: page.pageType,
+    namespace: page.namespace,
+    tags: page.tags,
+    tokenEstimate: estimateTokens(page.body),
+    outline: extractOutline(page.body),
+    excerpt: extractExcerpt(page.body),
+    sources: Array.isArray(page.metadata.sources)
+      ? page.metadata.sources.filter((s): s is string => typeof s === 'string')
+      : [],
+    links: outbound.map((l) => ({ type: l.type, title: l.title, wanted: l.wanted })),
+    backlinks: back.map((l) => ({ type: l.type, title: l.title })),
+    createdAt: page.createdAt,
+    updatedAt: page.updatedAt,
+    freshness: pageFreshness(page, opts),
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Links (the typed graph)
 // ---------------------------------------------------------------------------
 
@@ -442,10 +566,14 @@ export interface WikiGraph {
  * The wiki knowledge graph: every live page is a node; every resolved link whose
  * BOTH endpoints are live pages is an edge. Wanted (`to_id NULL`) links are omitted
  * — they have no node to point at. Degree counts edges incident to each node.
+ *
+ * `minDegree` drops sparsely-connected nodes; `limit` keeps only the N best-connected
+ * — both prune edges to surviving endpoints, so a large wiki returns a digestible core
+ * instead of thousands of nodes.
  */
 export async function wikiGraph(
   db: Kysely<Database>,
-  opts: { namespace?: string } = {},
+  opts: { namespace?: string; minDegree?: number; limit?: number } = {},
 ): Promise<WikiGraph> {
   const pages = await listPages(db, { namespace: opts.namespace, limit: 5000 })
   const ids = new Set(pages.map((p) => p.id))
@@ -456,22 +584,147 @@ export async function wikiGraph(
     .where('to_id', 'is not', null)
     .execute()
 
-  const edges: GraphEdge[] = []
+  const allEdges: GraphEdge[] = []
   const degree = new Map<string, number>()
   for (const r of rows) {
     if (!r.to || !ids.has(r.from) || !ids.has(r.to)) continue
-    edges.push({ from: r.from, to: r.to, type: r.type })
+    allEdges.push({ from: r.from, to: r.to, type: r.type })
     degree.set(r.from, (degree.get(r.from) ?? 0) + 1)
     degree.set(r.to, (degree.get(r.to) ?? 0) + 1)
   }
 
-  const nodes: GraphNode[] = pages.map((p) => ({
+  let nodes: GraphNode[] = pages.map((p) => ({
     id: p.id,
     title: p.title,
     pageType: p.pageType,
     degree: degree.get(p.id) ?? 0,
   }))
+  if (opts.minDegree !== undefined) {
+    const min = opts.minDegree
+    nodes = nodes.filter((n) => n.degree >= min)
+  }
+  if (opts.limit !== undefined && nodes.length > opts.limit) {
+    nodes = [...nodes].sort((a, b) => b.degree - a.degree).slice(0, opts.limit)
+  }
+  const kept = new Set(nodes.map((n) => n.id))
+  const edges =
+    kept.size === ids.size ? allEdges : allEdges.filter((e) => kept.has(e.from) && kept.has(e.to))
   return { nodes, edges }
+}
+
+// ---------------------------------------------------------------------------
+// Ingest status (resumable synthesis: derive checklist completion from the graph)
+// ---------------------------------------------------------------------------
+
+export interface IngestStep {
+  step: 'summary' | 'pages-updated' | 'index-refreshed' | 'verified'
+  done: boolean
+  detail: string
+}
+
+export interface IngestStatus {
+  sourceId: string
+  title: string | null
+  ingestedAt: string
+  steps: IngestStep[]
+  /** True when every derivable step is done — the synthesis cascade completed. */
+  complete: boolean
+}
+
+/**
+ * Derive how far the post-ingest synthesis got for a source, purely from the
+ * graph — no workflow state is stored, so the checklist is resumable across
+ * sessions and can never lie about what actually happened.
+ */
+export async function ingestStatus(
+  db: Kysely<Database>,
+  sourceId: string,
+): Promise<IngestStatus | null> {
+  const source = await getPage(db, sourceId)
+  if (!source || source.pageType !== 'source' || source.deletedAt) return null
+  const ingestedAt = source.createdAt
+  const steps: IngestStep[] = []
+
+  // 1. A live authored page links -[source]-> this source (the summary).
+  const inbound = await backlinks(db, source.id)
+  const derivedIds = inbound.filter((l) => l.type === 'source' && l.pageId).map((l) => l.pageId!)
+  const derived: Context[] = []
+  for (const id of derivedIds) {
+    const p = await getPage(db, id)
+    if (p && !p.deletedAt && p.pageType !== 'source' && p.pageType !== 'index') derived.push(p)
+  }
+  const summary = derived.sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1))[0]
+  steps.push(
+    summary
+      ? {
+          step: 'summary',
+          done: true,
+          detail: `"${summary.title}" links this source (type "source")`,
+        }
+      : {
+          step: 'summary',
+          done: false,
+          detail:
+            'no page derives from this source — write one and wiki_link it with type "source"',
+        },
+  )
+
+  // 2. Related pages woven in: authored pages (beyond the summary itself) updated
+  //    after the ingest timestamp. A count, not proof of relatedness — stated as such.
+  const derivedSet = new Set(derived.map((p) => p.id))
+  const updatedRows = await db
+    .selectFrom('contexts')
+    .select(['id'])
+    .where('page_type', 'is not', null)
+    .where('page_type', 'not in', ['source', 'index'])
+    .where('deleted_at', 'is', null)
+    .where('updated_at', '>', ingestedAt)
+    .execute()
+  const updatedCount = updatedRows.filter((r) => !derivedSet.has(r.id)).length
+  steps.push({
+    step: 'pages-updated',
+    done: updatedCount > 0,
+    detail: `${updatedCount} other page(s) updated after ingest (aim for ~5–15 related ones)`,
+  })
+
+  // 3. Index refreshed — only derivable when an index PAGE exists in the store
+  //    (a regenerated index.md file leaves no trace here).
+  const indexPages = await listPages(db, { pageType: 'index', limit: 10 })
+  const liveIndex = indexPages[0]
+  if (liveIndex) {
+    const indexDone =
+      liveIndex.updatedAt > ingestedAt ||
+      (summary !== undefined &&
+        (await outboundLinks(db, liveIndex.id)).some((l) => l.pageId === summary.id))
+    steps.push({
+      step: 'index-refreshed',
+      done: indexDone,
+      detail: indexDone
+        ? 'index page reflects this ingest'
+        : 'index page predates this ingest and does not link the summary',
+    })
+  }
+
+  // 4. The summary was verified after ingest (freshness honest).
+  if (summary) {
+    const f = pageFreshness(summary)
+    const verifiedAfter = f.verifiedAt !== null && f.verifiedAt > ingestedAt
+    steps.push({
+      step: 'verified',
+      done: verifiedAfter,
+      detail: verifiedAfter
+        ? `summary verified at ${f.verifiedAt}`
+        : 'summary not verified yet — wiki_verify it once checked',
+    })
+  }
+
+  return {
+    sourceId: source.id,
+    title: source.title,
+    ingestedAt,
+    steps,
+    complete: steps.every((s) => s.done),
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -540,6 +793,10 @@ export type LintKind =
   | 'ambiguous-wikilink'
   | 'source-without-page'
   | 'missing-from-index'
+  | 'stale'
+  | 'never-verified'
+  /** Produced by src/wiki/drift.ts (fs-based), merged into lint reports by callers. */
+  | 'drift'
 
 export interface LintFinding {
   kind: LintKind
@@ -553,12 +810,16 @@ export interface LintReport {
   counts: Record<string, number>
 }
 
-export async function lint(db: Kysely<Database>): Promise<LintReport> {
+export async function lint(
+  db: Kysely<Database>,
+  opts: { staleDays?: number } = {},
+): Promise<LintReport> {
   const findings: LintFinding[] = []
+  const staleDays = opts.staleDays ?? DEFAULT_STALE_DAYS
 
   const pages = await db
     .selectFrom('contexts')
-    .select(['id', 'title', 'page_type'])
+    .select(['id', 'title', 'page_type', 'metadata', 'updated_at'])
     .where('page_type', 'is not', null)
     .where('deleted_at', 'is', null)
     .execute()
@@ -690,6 +951,32 @@ export async function lint(db: Kysely<Database>): Promise<LintReport> {
         })
       }
     }
+  }
+
+  // freshness: authored pages last verified/updated more than staleDays ago.
+  // Sources are immutable and the index is generated, so age means nothing there.
+  for (const p of pages) {
+    if (p.page_type === 'index' || p.page_type === 'source') continue
+    const f = pageFreshness(
+      { metadata: parseMetadata(p.metadata), updatedAt: p.updated_at },
+      { staleDays },
+    )
+    if (f.state !== 'stale') continue
+    findings.push(
+      f.verifiedAt
+        ? {
+            kind: 'stale',
+            pageId: p.id,
+            title: p.title ?? '',
+            detail: `last verified ${f.ageDays}d ago (> ${staleDays}d) — re-verify or update`,
+          }
+        : {
+            kind: 'never-verified',
+            pageId: p.id,
+            title: p.title ?? '',
+            detail: `never verified; last updated ${f.ageDays}d ago (> ${staleDays}d)`,
+          },
+    )
   }
 
   const counts: Record<string, number> = {}

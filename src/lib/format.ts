@@ -1,4 +1,5 @@
 import type { Context } from '../core/contexts'
+import { estimateTokens, formatTokens } from './tokens'
 
 function indent(text: string): string {
   return text
@@ -22,7 +23,7 @@ export function formatContext(ctx: Context): string {
   if (ctx.title) lines.push(`  title: ${ctx.title}`)
   if (ctx.tags.length > 0) lines.push(`  tags:  ${ctx.tags.join(', ')}`)
   if (ctx.agentSource) lines.push(`  agent: ${ctx.agentSource}`)
-  lines.push(`  updated: ${ctx.updatedAt}`)
+  lines.push(`  updated: ${ctx.updatedAt}  (${formatTokens(estimateTokens(ctx.body))})`)
   lines.push('')
   lines.push(indent(ctx.body))
   return lines.join('\n')
@@ -38,7 +39,10 @@ export function formatList(items: Context[]): string {
       // Wiki pages carry a pageType (concept/entity/source/…); show that instead
       // of the underlying kind (always "note"). Mark soft-deleted rows (list --all).
       const del = c.deletedAt ? '  (deleted)' : ''
-      return `${c.id}  [${c.pageType ?? c.kind}]  ${label}${tags}${del}`
+      const cost = `  (${formatTokens(estimateTokens(c.body))})`
+      const line = `${c.id}  [${c.pageType ?? c.kind}]  ${label}${cost}${tags}${del}`
+      // Search results carry an FTS match excerpt — show it under the hit.
+      return c.snippet ? `${line}\n      ${truncate(c.snippet, 120)}` : line
     })
     .join('\n')
 }

@@ -1,5 +1,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import type { Context, LinkView, WikiGraph } from '../api/types'
+import type {
+  Context,
+  HistoryEntry,
+  LinkView,
+  LintReport,
+  WikiGraph,
+  WikiLogRow,
+} from '../api/types'
 import { wikiApi } from '../api/wiki'
 import { ConfirmDeleteDialog } from '../components/common/ConfirmDeleteDialog'
 import { GraphOverlay } from '../components/graph/GraphOverlay'
@@ -7,9 +14,11 @@ import { CommandPalette, type PaletteCommand } from '../components/layout/Comman
 import { ProjectSwitcher } from '../components/layout/ProjectSwitcher'
 import { Sidebar } from '../components/layout/Sidebar'
 import { TopBar } from '../components/layout/TopBar'
+import { HealthPanel } from '../components/wiki/HealthPanel'
 import { RightPanel } from '../components/wiki/RightPanel'
 import { WikiEditor, type WikiEditorHandle } from '../editor/WikiEditor'
 import { Hov, sx } from '../lib/dc'
+import { freshnessColor, pageFreshness } from '../lib/freshness'
 import { pageHref, useRoute } from '../state/router'
 import { useApp } from '../state/StoreContext'
 import { useAsync } from '../state/useAsync'
@@ -20,6 +29,7 @@ interface Detail {
   page: Context | null
   links: LinkView[]
   backlinks: LinkView[]
+  history: HistoryEntry[]
 }
 
 export function WikiView({ onNav }: { onNav: (v: 'wiki' | 'contexts') => void }) {
@@ -29,6 +39,7 @@ export function WikiView({ onNav }: { onNav: (v: 'wiki' | 'contexts') => void })
 
   const [layout, setLayout] = useState<Layout>('three')
   const [graphOpen, setGraphOpen] = useState(false)
+  const [healthOpen, setHealthOpen] = useState(false)
   const [paletteOpen, setPaletteOpen] = useState(false)
   const [projectsOpen, setProjectsOpen] = useState(false)
   const [localRev, setLocalRev] = useState(0)
@@ -60,13 +71,14 @@ export function WikiView({ onNav }: { onNav: (v: 'wiki' | 'contexts') => void })
   }, [onContextsRoute, routeId, pages, route])
 
   const detail = useAsync<Detail>(async () => {
-    if (!activeId) return { page: null, links: [], backlinks: [] }
-    const [page, links, backlinks] = await Promise.all([
+    if (!activeId) return { page: null, links: [], backlinks: [], history: [] }
+    const [page, links, backlinks, history] = await Promise.all([
       wikiApi.get(activeId).catch(() => null),
       wikiApi.links(activeId).catch(() => [] as LinkView[]),
       wikiApi.backlinks(activeId).catch(() => [] as LinkView[]),
+      wikiApi.history(activeId, 30).catch(() => [] as HistoryEntry[]),
     ])
-    return { page, links, backlinks }
+    return { page, links, backlinks, history }
   }, [activeId, app.rev, localRev])
 
   const graphState = useAsync<WikiGraph>(
@@ -74,10 +86,24 @@ export function WikiView({ onNav }: { onNav: (v: 'wiki' | 'contexts') => void })
     [graphOpen, app.rev, localRev],
   )
 
+  const lintState = useAsync<LintReport>(() => wikiApi.lint(), [app.rev, localRev, projectKey])
+  const logState = useAsync<WikiLogRow[]>(
+    () => (healthOpen ? wikiApi.log(100) : Promise.resolve([])),
+    [healthOpen, app.rev, localRev, projectKey],
+  )
+  const findingsByPage = useMemo(() => {
+    const map = new Map<string, number>()
+    for (const f of lintState.data?.findings ?? []) {
+      if (f.pageId) map.set(f.pageId, (map.get(f.pageId) ?? 0) + 1)
+    }
+    return map
+  }, [lintState.data])
+
   const flushThenNavigate = useCallback(
     async (id: string) => {
       await editorRef.current?.flush()
       setGraphOpen(false)
+      setHealthOpen(false)
       route.navigate(pageHref(id))
     },
     [route],
@@ -88,8 +114,12 @@ export function WikiView({ onNav }: { onNav: (v: 'wiki' | 'contexts') => void })
   // where the switch is triggered from (this view's switcher, the palette, etc.).
   useEffect(() => {
     app.registerFlush(() => editorRef.current?.flush() ?? Promise.resolve())
-    return () => app.registerFlush(null)
-  }, [app.registerFlush])
+    app.registerDirty(() => editorRef.current?.isDirty() ?? false)
+    return () => {
+      app.registerFlush(null)
+      app.registerDirty(null)
+    }
+  }, [app.registerFlush, app.registerDirty])
 
   const createPage = useCallback(
     async (title: string): Promise<Context | null> => {
@@ -137,6 +167,17 @@ export function WikiView({ onNav }: { onNav: (v: 'wiki' | 'contexts') => void })
     },
     [pages, activeId, pagesState, route, app],
   )
+
+  const onVerify = useCallback(async () => {
+    if (!activeId) return
+    try {
+      await wikiApi.verify(activeId)
+      setLocalRev((r) => r + 1)
+      app.toast('Verified')
+    } catch (e) {
+      app.toast(e instanceof Error ? e.message : 'Verify failed')
+    }
+  }, [activeId, app])
 
   const onLinkMention = useCallback(
     async (mentionId: string) => {
@@ -191,6 +232,7 @@ export function WikiView({ onNav }: { onNav: (v: 'wiki' | 'contexts') => void })
         setProjectsOpen(false)
         setPaletteOpen(false)
         setGraphOpen(false)
+        setHealthOpen(false)
       }
     }
     document.addEventListener('keydown', onKey)
@@ -213,7 +255,17 @@ export function WikiView({ onNav }: { onNav: (v: 'wiki' | 'contexts') => void })
       hint: 'view',
       run: () => {
         setPaletteOpen(false)
+        setHealthOpen(false)
         setGraphOpen(true)
+      },
+    },
+    {
+      label: 'Open health report',
+      hint: 'view',
+      run: () => {
+        setPaletteOpen(false)
+        setGraphOpen(false)
+        setHealthOpen(true)
       },
     },
     {
@@ -238,8 +290,20 @@ export function WikiView({ onNav }: { onNav: (v: 'wiki' | 'contexts') => void })
         layout={layout}
         setLayout={setLayout}
         graphOpen={graphOpen}
-        onEditor={() => setGraphOpen(false)}
-        onGraph={() => setGraphOpen(true)}
+        onEditor={() => {
+          setGraphOpen(false)
+          setHealthOpen(false)
+        }}
+        onGraph={() => {
+          setHealthOpen(false)
+          setGraphOpen(true)
+        }}
+        healthOpen={healthOpen}
+        healthCount={lintState.data?.findings.length ?? null}
+        onHealth={() => {
+          setGraphOpen(false)
+          setHealthOpen(true)
+        }}
         theme={app.theme}
         onToggleTheme={app.toggleTheme}
       />
@@ -254,6 +318,7 @@ export function WikiView({ onNav }: { onNav: (v: 'wiki' | 'contexts') => void })
             onNew={onNew}
             tagFilter={tagFilter}
             onClearTag={() => setTagFilter(null)}
+            findings={findingsByPage}
           />
         )}
 
@@ -277,7 +342,23 @@ export function WikiView({ onNav }: { onNav: (v: 'wiki' | 'contexts') => void })
                   <span style={sx("font:400 12px 'IBM Plex Mono';color:var(--muted);")}>
                     {page.pageType} {readOnly ? '· read-only source' : ''}
                   </span>
+                  {page.pageType !== 'source' && page.pageType !== 'index' && (
+                    <FreshnessBadge page={page} />
+                  )}
                   <span style={sx('flex:1;')} />
+                  {page.pageType !== 'source' && page.pageType !== 'index' && (
+                    <Hov
+                      as="button"
+                      base={sx(
+                        "font:500 11px 'IBM Plex Mono';color:var(--accent-ink);background:transparent;border:1px solid var(--border);border-radius:7px;padding:4px 11px;cursor:pointer;",
+                      )}
+                      hover={sx('border-color:var(--accent);')}
+                      onClick={() => void onVerify()}
+                      title="Mark this page's content as just checked against reality"
+                    >
+                      Verify
+                    </Hov>
+                  )}
                   <Hov
                     as="button"
                     base={sx(
@@ -357,6 +438,7 @@ export function WikiView({ onNav }: { onNav: (v: 'wiki' | 'contexts') => void })
             pages={pages}
             links={detail.data?.links ?? []}
             backlinks={detail.data?.backlinks ?? []}
+            history={detail.data?.history ?? []}
             onOpen={flushThenNavigate}
             onExpandGraph={() => setGraphOpen(true)}
             onLinkMention={onLinkMention}
@@ -373,6 +455,16 @@ export function WikiView({ onNav }: { onNav: (v: 'wiki' | 'contexts') => void })
             activeId={activeId}
             onOpen={flushThenNavigate}
             onClose={() => setGraphOpen(false)}
+          />
+        )}
+
+        {healthOpen && (
+          <HealthPanel
+            report={lintState.data ?? null}
+            loading={lintState.loading}
+            log={logState.data ?? []}
+            onOpen={flushThenNavigate}
+            onClose={() => setHealthOpen(false)}
           />
         )}
       </div>
@@ -411,4 +503,28 @@ export function WikiView({ onNav }: { onNav: (v: 'wiki' | 'contexts') => void })
 function countLinks(d: Detail | undefined): number {
   if (!d) return 0
   return d.links.filter((l) => !l.wanted).length
+}
+
+function FreshnessBadge({ page }: { page: Context }) {
+  const f = pageFreshness(page)
+  const label = f.state === 'unverified' ? 'unverified' : `${f.state} · ${f.ageDays}d`
+  const title =
+    f.state === 'verified'
+      ? `Verified ${f.ageDays}d ago${f.verifiedBy ? ` by ${f.verifiedBy}` : ''}`
+      : f.state === 'stale'
+        ? `Not ${f.verifiedAt ? 're-verified' : 'verified or updated'} in ${f.ageDays} days`
+        : 'Never verified'
+  return (
+    <span
+      title={title}
+      style={sx(
+        `display:inline-flex;align-items:center;gap:5px;font:500 11px 'IBM Plex Mono';color:${freshnessColor(f.state)};`,
+      )}
+    >
+      <span
+        style={sx(`width:6px;height:6px;border-radius:50%;background:${freshnessColor(f.state)};`)}
+      />
+      {label}
+    </span>
+  )
 }

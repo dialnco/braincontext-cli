@@ -23,6 +23,8 @@ export interface Context {
   createdAt: string
   updatedAt: string
   deletedAt: string | null
+  /** FTS match excerpt («match» highlighted) — present only on search results. */
+  snippet?: string
 }
 
 export interface CreateInput {
@@ -77,7 +79,7 @@ function nowIso(): string {
   return new Date().toISOString()
 }
 
-function parseMetadata(raw: string): Record<string, unknown> {
+export function parseMetadata(raw: string): Record<string, unknown> {
   try {
     const value = JSON.parse(raw)
     return value && typeof value === 'object' ? (value as Record<string, unknown>) : {}
@@ -456,7 +458,8 @@ export async function searchContexts(
 ): Promise<Context[]> {
   const limit = filters.limit ?? 50
 
-  const run = async (matchExpr: string): Promise<ContextRow[]> => {
+  type SearchRow = ContextRow & { snippet: string | null }
+  const run = async (matchExpr: string): Promise<SearchRow[]> => {
     const conditions = [sql`contexts_fts MATCH ${matchExpr}`]
     if (!filters.includeDeleted) conditions.push(sql`c.deleted_at IS NULL`)
     const pageScope = filters.pageScope ?? 'context'
@@ -477,8 +480,10 @@ export async function searchContexts(
       )
     }
     const where = sql.join(conditions, sql` AND `)
-    const result = await sql<ContextRow>`
-      SELECT c.* FROM contexts c
+    // snippet() over column 1 (body) gives callers match context without the body.
+    const result = await sql<SearchRow>`
+      SELECT c.*, snippet(contexts_fts, 1, '«', '»', '…', 12) AS snippet
+      FROM contexts c
       JOIN contexts_fts ON contexts_fts.rowid = c.rowid
       WHERE ${where}
       ORDER BY bm25(contexts_fts)
@@ -490,7 +495,7 @@ export async function searchContexts(
   // Try the query as written (supports FTS5 operators); on an FTS5 *syntax* error fall
   // back to a sanitized term-quoted query so ordinary input ("C++", "a:b") works. A real
   // DB fault (busy/locked/I-O/corruption) is re-thrown — never masked as "no results".
-  let rows: ContextRow[]
+  let rows: SearchRow[]
   try {
     rows = await run(query)
   } catch (e) {
@@ -503,5 +508,8 @@ export async function searchContexts(
     db,
     rows.map((r) => r.id),
   )
-  return rows.map((r) => toContext(r, tagMap.get(r.id) ?? []))
+  return rows.map((r) => ({
+    ...toContext(r, tagMap.get(r.id) ?? []),
+    snippet: r.snippet ?? undefined,
+  }))
 }

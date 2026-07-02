@@ -100,6 +100,18 @@ export function openStore(t: DbTarget): Store {
 }
 
 /**
+ * SQLite `PRAGMA data_version` — increments (as seen by this connection) whenever
+ * ANOTHER connection commits to the same database file. Near-zero cost; the studio
+ * polls it to notice agent/CLI writes. Note the counter is per-connection state, so
+ * a recycled connection may report a fresh baseline — callers must treat any CHANGE
+ * as "maybe modified" (a spurious refetch is cheap), never diff the magnitude.
+ */
+export async function dataVersion(db: Kysely<Database>): Promise<number> {
+  const r = await sql<{ data_version: number }>`PRAGMA data_version`.execute(db)
+  return Number(r.rows[0]?.data_version ?? 0)
+}
+
+/**
  * Resolve the connection target, ensure its directory exists, open it, freshen a
  * replica, run any pending migrations (idempotent), run `fn`, settle the replica,
  * then always close the connection.

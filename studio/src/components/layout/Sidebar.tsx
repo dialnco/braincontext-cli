@@ -19,6 +19,8 @@ interface Props {
   /** Active tag filter, if any (the `pages` arrive already filtered to it). */
   tagFilter?: string | null
   onClearTag?: () => void
+  /** Lint finding count per page id — rows with findings get a small dot. */
+  findings?: Map<string, number>
 }
 
 type Mode = 'folder' | 'type'
@@ -31,6 +33,7 @@ export function Sidebar({
   onNew,
   tagFilter,
   onClearTag,
+  findings,
 }: Props) {
   const [mode, setMode] = useState<Mode>('folder')
   // `collapsed[key]` is an explicit user override: true = closed, false = open. In
@@ -164,6 +167,7 @@ export function Sidebar({
           isOpen={isOpen}
           onToggle={toggle}
           onOpen={onOpen}
+          findings={findings}
         />
       ) : (
         typeKeys.map((key) => {
@@ -220,6 +224,7 @@ export function Sidebar({
                       >
                         {p.title || 'Untitled'}
                       </span>
+                      <FindingDot count={findings?.get(p.id)} />
                     </Hov>
                   )
                 })}
@@ -243,6 +248,17 @@ export function Sidebar({
   )
 }
 
+/** Small amber dot marking a page with lint findings. */
+function FindingDot({ count }: { count: number | undefined }) {
+  if (!count) return null
+  return (
+    <span
+      title={`${count} lint finding${count === 1 ? '' : 's'}`}
+      style={sx('width:6px;height:6px;border-radius:50%;background:#c98a6a;flex:0 0 auto;')}
+    />
+  )
+}
+
 /** Recursively render a folder's subfolders (collapsible) then its files. */
 function TreeRows({
   folder,
@@ -251,6 +267,7 @@ function TreeRows({
   isOpen,
   onToggle,
   onOpen,
+  findings,
 }: {
   folder: TreeFolder
   depth: number
@@ -258,6 +275,7 @@ function TreeRows({
   isOpen: (path: string) => boolean
   onToggle: (path: string) => void
   onOpen: (id: string) => void
+  findings?: Map<string, number>
 }) {
   return (
     <>
@@ -296,6 +314,7 @@ function TreeRows({
                 isOpen={isOpen}
                 onToggle={onToggle}
                 onOpen={onOpen}
+                findings={findings}
               />
             )}
           </div>
@@ -326,6 +345,7 @@ function TreeRows({
             >
               {file.name}
             </span>
+            <FindingDot count={findings?.get(file.page.id)} />
           </Hov>
         )
       })}

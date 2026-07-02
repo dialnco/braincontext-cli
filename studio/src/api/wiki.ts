@@ -1,5 +1,14 @@
 import { api, qs } from './client'
-import type { AuthoredPageType, Context, LinkType, LinkView, WikiGraph, WikiLogRow } from './types'
+import type {
+  AuthoredPageType,
+  Context,
+  HistoryEntry,
+  LinkType,
+  LinkView,
+  LintReport,
+  WikiGraph,
+  WikiLogRow,
+} from './types'
 
 export interface ListPagesParams {
   type?: string
@@ -40,6 +49,7 @@ export const wikiApi = {
   get: (id: string) => api.get<Context>(`/wiki/pages/${id}`),
   create: (input: CreatePageInput) => api.post<Context>('/wiki/pages', input),
   update: (id: string, patch: UpdatePageInput) => api.patch<Context>(`/wiki/pages/${id}`, patch),
+  verify: (id: string) => api.post<Context>(`/wiki/pages/${id}/verify`, {}),
   remove: (id: string, hard = false) =>
     api.del<{ deleted: boolean }>(`/wiki/pages/${id}${hard ? '?hard=1' : ''}`),
   links: (id: string) => api.get<LinkView[]>(`/wiki/pages/${id}/links`),
@@ -50,4 +60,7 @@ export const wikiApi = {
   graph: (namespace?: string) => api.get<WikiGraph>(`/wiki/graph${qs({ namespace })}`),
   resolve: (title: string) => api.get<Context | null>(`/wiki/resolve${qs({ title })}`),
   log: (tail?: number) => api.get<WikiLogRow[]>(`/wiki/log${qs({ tail })}`),
+  lint: (staleDays?: number) => api.get<LintReport>(`/wiki/lint${qs({ staleDays })}`),
+  history: (id: string, limit?: number) =>
+    api.get<HistoryEntry[]>(`/wiki/pages/${id}/history${qs({ limit })}`),
 }

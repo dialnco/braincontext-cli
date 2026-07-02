@@ -17,6 +17,11 @@ interface Props {
   graphOpen: boolean
   onEditor: () => void
   onGraph: () => void
+  /** Health segment — wiki view only (the contexts view omits these). */
+  healthOpen?: boolean
+  /** Lint finding count (null while loading). */
+  healthCount?: number | null
+  onHealth?: () => void
   theme: 'light' | 'dark'
   onToggleTheme: () => void
 }
@@ -135,12 +140,35 @@ export function TopBar(props: Props) {
                 'display:flex;background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:2px;gap:2px;',
               )}
             >
-              <div onClick={props.onEditor} style={sx(seg(!props.graphOpen))}>
+              <div
+                onClick={props.onEditor}
+                style={sx(seg(!props.graphOpen && !(props.healthOpen ?? false)))}
+              >
                 Editor
               </div>
               <div onClick={props.onGraph} style={sx(seg(props.graphOpen))}>
                 Graph
               </div>
+              {props.onHealth && (
+                <div
+                  onClick={props.onHealth}
+                  title="Wiki health (lint findings)"
+                  style={sx(
+                    `${seg(props.healthOpen ?? false)}display:flex;align-items:center;gap:6px;`,
+                  )}
+                >
+                  Health
+                  {(props.healthCount ?? 0) > 0 && (
+                    <span
+                      style={sx(
+                        `font:600 10px 'IBM Plex Mono';border-radius:8px;padding:0 5px;background:${props.healthOpen ? 'rgba(255,255,255,.25)' : 'var(--accent-soft)'};color:${props.healthOpen ? '#fff' : '#c98a6a'};`,
+                      )}
+                    >
+                      {props.healthCount}
+                    </span>
+                  )}
+                </div>
+              )}
             </div>
           </>
         )}
