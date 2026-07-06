@@ -31,6 +31,10 @@ export interface UpdatePageInput {
   addTags?: string[]
   removeTags?: string[]
   setMetadata?: Record<string, unknown>
+  /** Optimistic-concurrency guard — reject if the page rev no longer matches. */
+  ifRev?: string
+  /** Labels the write in history (e.g. 'undo' / 'redo' / 'restore'). */
+  agentSource?: string
 }
 
 export interface LinkInput {
@@ -39,6 +43,35 @@ export interface LinkInput {
   toTitle?: string
   type: LinkType
 }
+
+/** Edit one table cell in place (lossless splice server-side, no whole-body PATCH). */
+export interface TableCellEdit {
+  tableIndex?: number
+  caption?: string
+  row: string
+  column: string
+  value: string
+  ifRev?: string
+}
+
+export type ColumnAlign = 'left' | 'right' | 'center'
+
+/** Shared locator + CAS handle on every structural table op (default locator = sole table). */
+export interface TableOpLocator {
+  tableIndex?: number
+  caption?: string
+  ifRev?: string
+}
+
+/** An index-addressed structural table op for the datatable grid (→ POST /pages/:id/table/op). */
+export type TableOp =
+  | (TableOpLocator & { op: 'setCell'; row: number; col: number; value: string })
+  | (TableOpLocator & { op: 'addRow'; cells?: string[] })
+  | (TableOpLocator & { op: 'deleteRow'; row: number })
+  | (TableOpLocator & { op: 'addColumn'; name: string; at?: number; align?: ColumnAlign | null })
+  | (TableOpLocator & { op: 'deleteColumn'; col: number })
+  | (TableOpLocator & { op: 'renameColumn'; col: number; name: string })
+  | (TableOpLocator & { op: 'setAlign'; col: number; align: ColumnAlign | null })
 
 /** Wiki API surface. Bodies PATCH'd here re-sync `[[..]]` links server-side. */
 export const wikiApi = {
@@ -49,6 +82,8 @@ export const wikiApi = {
   get: (id: string) => api.get<Context>(`/wiki/pages/${id}`),
   create: (input: CreatePageInput) => api.post<Context>('/wiki/pages', input),
   update: (id: string, patch: UpdatePageInput) => api.patch<Context>(`/wiki/pages/${id}`, patch),
+  editCell: (id: string, edit: TableCellEdit) => api.post<Context>(`/wiki/pages/${id}/table`, edit),
+  tableOp: (id: string, op: TableOp) => api.post<Context>(`/wiki/pages/${id}/table/op`, op),
   verify: (id: string) => api.post<Context>(`/wiki/pages/${id}/verify`, {}),
   remove: (id: string, hard = false) =>
     api.del<{ deleted: boolean }>(`/wiki/pages/${id}${hard ? '?hard=1' : ''}`),

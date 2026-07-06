@@ -1,14 +1,37 @@
 import { basename, resolve } from 'node:path'
 import { Command } from 'commander'
 import { z } from 'zod'
-import { type Context, deleteContext, type UpdateInput } from '../core/contexts'
+import { type Context, deleteContext, RevConflictError, type UpdateInput } from '../core/contexts'
+import { createDatatable, expandTransclusions } from '../core/datatable'
 import { withDb } from '../core/db'
+import { EditError, editPage, getPageSection, patchPageSection } from '../core/edit'
+import {
+  listProperties,
+  type PropertyKeyInfo,
+  queryPages,
+  renderView,
+  type WhereClause,
+  type WikiQuery,
+} from '../core/query'
+import {
+  extractTableToDatatable,
+  TableError,
+  type TableLocator,
+  tableAddColumn,
+  tableAddRow,
+  tableDeleteColumn,
+  tableDeleteRow,
+  tableGet,
+  tableRenameColumn,
+  tableSetCell,
+} from '../core/tables'
 import { AUTHORED_PAGE_TYPES, LINK_TYPES } from '../core/types'
 import {
   addLink,
   appendLog,
   backlinks,
   createPage,
+  createView,
   ingestStatus,
   lint,
   listLog,
@@ -17,14 +40,17 @@ import {
   pageFreshness,
   pagePeek,
   recordSource,
+  reindexWiki,
   removeLink,
   resolvePageRef,
   searchPages,
+  setPageProps,
   updatePage,
   verifyPage,
 } from '../core/wiki'
 import { resolveAgent } from '../lib/agent'
 import { formatList } from '../lib/format'
+import { type Align, columnIndex, serializeTable } from '../lib/mdtable'
 import { truncateAtTokens } from '../lib/outline'
 import { resolveBody } from '../lib/stdin'
 import { estimateTokens, formatTokens } from '../lib/tokens'
@@ -77,12 +103,22 @@ export function wikiCommand(): Command {
     .option('--namespace <ns>', 'wiki namespace', 'wiki')
     .option('--tags <a,b,c>', 'comma-separated tags')
     .option('--sources <a,b,c>', 'repo-relative source files this page documents (drift tracking)')
+    .option(
+      '--prop <key=value>',
+      'set a typed property (repeatable; queryable via `wiki query`)',
+      collect,
+      [],
+    )
     .option('--agent <name>', 'agent source label')
     .option('--json', 'output JSON')
     .action(async (title: string, opts, command: Command) => {
       const pageType = z.enum(AUTHORED_PAGE_TYPES).parse(opts.type)
       const body = opts.body ?? (await resolveBody(opts.file, []))
       const sources = splitCsv(opts.sources)
+      const props = parseProps(opts.prop as string[])
+      const metadata: Record<string, unknown> = {}
+      if (sources.length > 0) metadata.sources = sources
+      if (Object.keys(props).length > 0) metadata.props = props
       const page = await withDb(dbOptsFrom(command), (db) =>
         createPage(db, {
           title,
@@ -91,7 +127,7 @@ export function wikiCommand(): Command {
           namespace: opts.namespace,
           tags: splitCsv(opts.tags),
           agentSource: resolveAgent(opts.agent),
-          metadata: sources && sources.length > 0 ? { sources } : undefined,
+          metadata: Object.keys(metadata).length > 0 ? metadata : undefined,
         }),
       )
       console.log(
@@ -107,11 +143,27 @@ export function wikiCommand(): Command {
       'Fetch a page by id, slug, or title. Use --peek to preview outline/excerpt/cost before spending tokens on the full body.',
     )
     .option('--peek', 'summary view: outline + excerpt + links + token cost (no full body)')
+    .option('--section <heading>', 'print only this heading-anchored section (no #)')
     .option('--max-tokens <n>', 'truncate the body to ~N tokens (at a paragraph boundary)')
+    .option('--no-embed', 'leave ![[Title]] transclusions unexpanded (show the raw body)')
     .option('--json', 'output JSON')
     .action(async (ref: string, opts, command: Command) => {
       const maxTokens = parsePositiveInt(opts.maxTokens, '--max-tokens')
       await withDb(dbOptsFrom(command), async (db) => {
+        if (opts.section) {
+          try {
+            const view = await getPageSection(db, ref, opts.section)
+            console.log(opts.json ? JSON.stringify(view, null, 2) : view.text)
+          } catch (e) {
+            if (e instanceof EditError) {
+              console.error(e.message)
+              process.exitCode = 1
+              return
+            }
+            throw e
+          }
+          return
+        }
         const page = await resolvePageRef(db, ref)
         if (!page) {
           console.error(`No wiki page matching "${ref}".`)
@@ -142,9 +194,15 @@ export function wikiCommand(): Command {
           if (peek.excerpt) console.log(`\n${peek.excerpt}`)
           return
         }
-        let body = page.body
+        // A `view` renders live from its saved query; else `![[Title]]` embeds inline the
+        // referenced page on read (--no-embed shows the stored body verbatim; commander maps
+        // --no-embed to embed:false).
+        let body: string
+        if (page.pageType === 'view') body = await renderView(db, page.metadata)
+        else if (opts.embed === false) body = page.body
+        else body = await expandTransclusions(db, page.body)
         if (maxTokens) {
-          const t = truncateAtTokens(page.body, maxTokens)
+          const t = truncateAtTokens(body, maxTokens)
           if (t.truncated) {
             body = `${t.text}\n\n[truncated at ~${t.returnedTokens} of ~${t.totalTokens} tokens — rerun without --max-tokens for the rest]`
           }
@@ -212,6 +270,7 @@ export function wikiCommand(): Command {
     .option('--add-tag <tag>', 'add a tag (repeatable)', collect, [])
     .option('--rm-tag <tag>', 'remove a tag (repeatable)', collect, [])
     .option('--sources <a,b,c>', 'replace the source files this page documents (drift tracking)')
+    .option('--if-rev <rev>', 'only update if the page rev still matches (optimistic concurrency)')
     .option('--agent <name>', 'agent source label for this change')
     .option('--json', 'output JSON')
     .action(async (ref: string, opts, command: Command) => {
@@ -233,12 +292,26 @@ export function wikiCommand(): Command {
           'Nothing to update. Pass --title, --body/--file, --add-tag, --rm-tag, or --sources.',
         )
       }
+      // Set ifRev after the "nothing to update" guard so a bare --if-rev isn't a no-op edit.
+      if (opts.ifRev) patch.ifRev = opts.ifRev
 
-      const page = await withDb(dbOptsFrom(command), async (db) => {
-        const target = await resolvePageRef(db, ref)
-        if (!target) return null
-        return updatePage(db, target.id, patch)
-      })
+      let page: Context | null
+      try {
+        page = await withDb(dbOptsFrom(command), async (db) => {
+          const target = await resolvePageRef(db, ref)
+          if (!target) return null
+          return updatePage(db, target.id, patch)
+        })
+      } catch (e) {
+        if (e instanceof RevConflictError) {
+          console.error(
+            `Conflict: "${ref}" changed since it was read (current rev ${e.currentRev}). Re-read and retry.`,
+          )
+          process.exitCode = 1
+          return
+        }
+        throw e
+      }
       if (!page) {
         console.error(`No wiki page matching "${ref}".`)
         process.exitCode = 1
@@ -249,6 +322,67 @@ export function wikiCommand(): Command {
           ? JSON.stringify(page, null, 2)
           : `Updated page "${page.title}" (${page.id}) [${page.slug}]`,
       )
+    })
+
+  wiki
+    .command('patch-section <ref>')
+    .description(
+      'Replace ONE heading-anchored section instead of rewriting the whole body. --body is spliced in verbatim (include the heading line to keep it). Refuses if the heading is missing or ambiguous.',
+    )
+    .requiredOption('--section <heading>', 'heading text of the section to replace (no #)')
+    .option('--body <text>', 'new section markdown (or use --file / stdin)')
+    .option('--file <path>', 'read the new section from a file (- for stdin)')
+    .option('--if-rev <rev>', 'only apply if the page rev still matches')
+    .option('--agent <name>', 'agent source label')
+    .option('--json', 'output JSON')
+    .action(async (ref: string, opts, command: Command) => {
+      const body = opts.body ?? (await resolveBody(opts.file, []))
+      try {
+        const page = await withDb(dbOptsFrom(command), (db) =>
+          patchPageSection(db, ref, opts.section, body, {
+            ifRev: opts.ifRev,
+            agentSource: resolveAgent(opts.agent),
+          }),
+        )
+        console.log(
+          opts.json
+            ? JSON.stringify(page, null, 2)
+            : `Patched section "${opts.section}" in "${page.title}" (rev ${page.rev})`,
+        )
+      } catch (e) {
+        if (!reportEditError(e)) throw e
+      }
+    })
+
+  wiki
+    .command('replace <ref>')
+    .description(
+      "Anchored exact find→replace on a page body (for prose/links a table/section op can't reach). Exact-match-or-refuse: with no --occurrence, --find must occur exactly once.",
+    )
+    .requiredOption('--find <text>', 'exact text to find')
+    .requiredOption('--replace <text>', 'replacement text')
+    .option('--occurrence <n>', 'which 1-based match to replace (when --find occurs many times)')
+    .option('--if-rev <rev>', 'only apply if the page rev still matches')
+    .option('--agent <name>', 'agent source label')
+    .option('--json', 'output JSON')
+    .action(async (ref: string, opts, command: Command) => {
+      const occurrence = parsePositiveInt(opts.occurrence, '--occurrence')
+      try {
+        const page = await withDb(dbOptsFrom(command), (db) =>
+          editPage(db, ref, opts.find, opts.replace, {
+            occurrence,
+            ifRev: opts.ifRev,
+            agentSource: resolveAgent(opts.agent),
+          }),
+        )
+        console.log(
+          opts.json
+            ? JSON.stringify(page, null, 2)
+            : `Replaced text in "${page.title}" (rev ${page.rev})`,
+        )
+      } catch (e) {
+        if (!reportEditError(e)) throw e
+      }
     })
 
   wiki
@@ -541,5 +675,568 @@ export function wikiCommand(): Command {
       console.log(`Imported: ${r.created} created, ${r.updated} updated, ${r.skipped} skipped.`)
     })
 
+  wiki
+    .command('reindex')
+    .description(
+      'Repair derived state from the authoritative pages: rebuild the page_properties mirror (for `wiki query`/views). With --links, also re-derive the [[references]]/![[embeds]] graph. Idempotent; does not modify the pages themselves. Run after a schema/parser upgrade.',
+    )
+    .option('--links', 're-derive the typed-link graph too (references + embeds)')
+    .option('--json', 'output JSON')
+    .action(async (opts, command: Command) => {
+      const r = await withDb(dbOptsFrom(command), (db) => reindexWiki(db, { links: opts.links }))
+      console.log(
+        opts.json
+          ? JSON.stringify(r, null, 2)
+          : `Reindexed ${r.pages} page(s): ${r.propsRebuilt} with properties${r.linksResynced ? ', link graph re-derived' : ''}.`,
+      )
+    })
+
+  wiki
+    .command('query')
+    .description(
+      'Find pages by their typed properties. --where is a JSON object; each key is ANDed and its value is a scalar (eq) or a condition like {"gt":2} / {"in":["a","b"]} / {"contains":"x"}.',
+    )
+    .requiredOption('--where <json>', 'JSON predicate, e.g. \'{"status":"deprecated"}\'')
+    .option('--sort <key[:dir]>', 'sort by a property (dir = asc|desc)')
+    .option('--sort-numeric', 'compare the sort key numerically')
+    .option('--limit <n>', 'max rows (default 100)')
+    .option('--json', 'output JSON')
+    .action(async (opts, command: Command) => {
+      const q = buildWikiQuery(opts)
+      const pages = await withDb(dbOptsFrom(command), (db) => queryPages(db, q))
+      if (opts.json) {
+        console.log(JSON.stringify(pages, null, 2))
+        return
+      }
+      if (pages.length === 0) {
+        console.log('No pages match.')
+        return
+      }
+      for (const p of pages) {
+        console.log(`${p.id}  [${p.pageType}]  ${p.title ?? p.slug}`)
+      }
+      console.log(`\n${pages.length} page(s).`)
+    })
+
+  wiki
+    .command('list-properties')
+    .alias('props')
+    .description('List the distinct queryable property keys across the wiki (with counts).')
+    .option('--json', 'output JSON')
+    .action(async (opts, command: Command) => {
+      const keys = await withDb(dbOptsFrom(command), (db) => listProperties(db))
+      if (opts.json) {
+        console.log(JSON.stringify(keys, null, 2))
+        return
+      }
+      if (keys.length === 0) {
+        console.log('No properties set on any page yet.')
+        return
+      }
+      for (const k of keys as PropertyKeyInfo[]) {
+        console.log(`${k.key}  (${k.count} page(s), ${k.types.join('/')})`)
+      }
+    })
+
+  wiki
+    .command('set-prop <ref>')
+    .description('Set or delete one typed property on a page (mirrored for `wiki query`).')
+    .requiredOption('--key <name>', 'property name')
+    .option('--value <v>', 'property value (omit with --rm to delete the key)')
+    .option('--type <t>', 'value type: string | number | boolean (default: inferred)')
+    .option('--rm', 'delete the property instead of setting it')
+    .option('--if-rev <rev>', 'only apply if the page rev still matches')
+    .option('--agent <name>', 'agent source label')
+    .option('--json', 'output JSON')
+    .action(async (ref: string, opts, command: Command) => {
+      const value = opts.rm ? null : coerceProp(opts.value, opts.type)
+      try {
+        const page = await withDb(dbOptsFrom(command), async (db) => {
+          const target = await resolvePageRef(db, ref)
+          if (!target) return null
+          return setPageProps(
+            db,
+            target.id,
+            { [opts.key]: value },
+            { ifRev: opts.ifRev, agentSource: resolveAgent(opts.agent) },
+          )
+        })
+        if (!page) {
+          console.error(`No wiki page matching "${ref}".`)
+          process.exitCode = 1
+          return
+        }
+        console.log(
+          opts.json
+            ? JSON.stringify(page, null, 2)
+            : `${opts.rm ? 'Removed' : 'Set'} ${opts.key} on "${page.title}" (rev ${page.rev})`,
+        )
+      } catch (e) {
+        if (e instanceof RevConflictError) {
+          console.error(
+            `Conflict: the page changed since it was read (current rev ${e.currentRev}). Re-read and retry.`,
+          )
+          process.exitCode = 1
+          return
+        }
+        throw e
+      }
+    })
+
+  wiki.addCommand(tableCommand())
+  wiki.addCommand(datatableCommand())
+  wiki.addCommand(viewCommand())
+
   return wiki
+}
+
+/** Build a WikiQuery from the `wiki query` / `wiki view new` CLI options. */
+function buildWikiQuery(opts: {
+  where: string
+  sort?: string
+  sortNumeric?: boolean
+  limit?: string
+}): WikiQuery {
+  let where: WhereClause
+  try {
+    const parsed = JSON.parse(opts.where)
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      throw new Error('--where must be a JSON object')
+    }
+    where = parsed as WhereClause
+  } catch (e) {
+    throw new Error(`Invalid --where JSON: ${(e as Error).message}`)
+  }
+  const q: WikiQuery = { where }
+  if (opts.sort) {
+    const [key, dir] = opts.sort.split(':')
+    q.sort = {
+      key: (key ?? '').trim(),
+      dir: dir === 'asc' ? 'asc' : 'desc',
+      numeric: opts.sortNumeric === true,
+    }
+  }
+  const limit = parsePositiveInt(opts.limit, '--limit')
+  if (limit !== undefined) q.limit = limit
+  return q
+}
+
+/** Parse repeatable `--prop key=value` options into a typed props record (values inferred). */
+function parseProps(pairs: string[]): Record<string, string | number | boolean> {
+  const out: Record<string, string | number | boolean> = {}
+  for (const pair of pairs) {
+    const eq = pair.indexOf('=')
+    if (eq < 1) throw new Error(`Invalid --prop "${pair}" (expected key=value)`)
+    const key = pair.slice(0, eq).trim()
+    if (!key) throw new Error(`Invalid --prop "${pair}" (empty key)`)
+    out[key] = coerceProp(pair.slice(eq + 1))
+  }
+  return out
+}
+
+/** Coerce a CLI --value string to a typed prop (explicit --type, else inferred). */
+function coerceProp(value: string | undefined, type?: string): string | number | boolean {
+  if (value === undefined) throw new Error('--value is required unless --rm is given')
+  if (type === 'number' || (type === undefined && /^-?\d+(\.\d+)?$/.test(value))) {
+    const n = Number(value)
+    if (!Number.isFinite(n)) throw new Error(`--value "${value}" is not a number`)
+    return n
+  }
+  if (type === 'boolean' || (type === undefined && (value === 'true' || value === 'false'))) {
+    if (value !== 'true' && value !== 'false') throw new Error('--value must be true or false')
+    return value === 'true'
+  }
+  return value
+}
+
+/** `bctx wiki view new` — save a query as a `view` page rendered to a live GFM table. */
+function viewCommand(): Command {
+  const view = new Command('view').description(
+    'Saved views: a `view` page whose body is a live GFM table of pages matching a saved query.',
+  )
+
+  view
+    .command('new <title>')
+    .description('Create a view from a --where query and the property --columns to project.')
+    .requiredOption('--where <json>', 'JSON predicate (same grammar as `wiki query`)')
+    .requiredOption('--columns <a,b,c>', 'property columns to show in the table')
+    .option('--sort <key[:dir]>', 'sort by a property (dir = asc|desc)')
+    .option('--sort-numeric', 'compare the sort key numerically')
+    .option('--namespace <ns>', 'wiki namespace', 'wiki')
+    .option('--tags <a,b,c>', 'comma-separated tags')
+    .option('--agent <name>', 'agent source label')
+    .option('--json', 'output JSON')
+    .action(async (title: string, opts, command: Command) => {
+      const query = buildWikiQuery(opts)
+      const columns = splitCsv(opts.columns)
+      const page = await withDb(dbOptsFrom(command), (db) =>
+        createView(db, {
+          title,
+          query,
+          columns,
+          namespace: opts.namespace,
+          tags: splitCsv(opts.tags),
+          agentSource: resolveAgent(opts.agent),
+        }),
+      )
+      console.log(
+        opts.json
+          ? JSON.stringify(page, null, 2)
+          : `Created view "${page.title}" (${page.id}) [${page.slug}]`,
+      )
+    })
+
+  return view
+}
+
+/** `bctx wiki datatable new` — create a page whose body is a canonical GFM table. */
+function datatableCommand(): Command {
+  const dt = new Command('datatable').description(
+    'Datatables: a page whose body is one canonical GFM table, embeddable in many pages via ![[Title]].',
+  )
+
+  dt.command('new <title>')
+    .description('Create a datatable page from column headers (and optional rows).')
+    .requiredOption('--columns <a,b,c>', 'comma-separated column headers')
+    .option('--row <a,b,c>', 'a row of cells in header order (repeatable)', collect, [])
+    .option('--namespace <ns>', 'wiki namespace', 'wiki')
+    .option('--tags <a,b,c>', 'comma-separated tags')
+    .option('--agent <name>', 'agent source label')
+    .option('--json', 'output JSON')
+    .action(async (title: string, opts, command: Command) => {
+      const columns = splitCsv(opts.columns)
+      if (columns.length === 0) throw new Error('--columns must list at least one header')
+      const rows = (opts.row as string[]).map((r) => splitCsv(r))
+      const page = await withDb(dbOptsFrom(command), (db) =>
+        createDatatable(db, {
+          title,
+          columns,
+          rows,
+          namespace: opts.namespace,
+          tags: splitCsv(opts.tags),
+          agentSource: resolveAgent(opts.agent),
+        }),
+      )
+      console.log(
+        opts.json
+          ? JSON.stringify(page, null, 2)
+          : `Created datatable "${page.title}" (${page.id}) [${page.slug}] — embed with ![[${page.title}]]`,
+      )
+    })
+
+  dt.command('extract <ref>')
+    .description(
+      'Move a table out of a page into its own datatable, leaving a ![[Title]] embed in its place.',
+    )
+    .requiredOption('--title <title>', 'title for the new datatable page')
+    .option('--caption <text>', 'heading above the table (to pick one of several)')
+    .option('--table-index <n>', '0-based table index on the page')
+    .option('--namespace <ns>', 'wiki namespace for the datatable (defaults to the source page)')
+    .option('--if-rev <rev>', 'only apply if the page rev still matches (optimistic concurrency)')
+    .option('--agent <name>', 'agent source label for this change')
+    .option('--json', 'output JSON')
+    .action(async (ref: string, opts, command: Command) => {
+      const loc: TableLocator = {
+        caption: opts.caption,
+        tableIndex: parseTableIndex(opts.tableIndex),
+      }
+      try {
+        const { datatable, page } = await withDb(dbOptsFrom(command), (db) =>
+          extractTableToDatatable(db, ref, loc, {
+            title: opts.title,
+            namespace: opts.namespace,
+            ifRev: opts.ifRev,
+            agentSource: resolveAgent(opts.agent),
+          }),
+        )
+        console.log(
+          opts.json
+            ? JSON.stringify({ datatable, page }, null, 2)
+            : `Extracted table from "${page.title}" into datatable "${datatable.title}" (${datatable.id}) [${datatable.slug}] — source now embeds ![[${datatable.title}]] (rev ${page.rev})`,
+        )
+      } catch (e) {
+        if (!reportTableError(e)) throw e
+      }
+    })
+
+  return dt
+}
+
+/** Parse a 0-based table index (0 is valid, unlike parsePositiveInt). */
+function parseTableIndex(value: string | undefined): number | undefined {
+  if (value === undefined) return undefined
+  const n = Number(value)
+  if (!Number.isInteger(n) || n < 0) throw new Error('--table-index must be a non-negative integer')
+  return n
+}
+
+/** Parse a column alignment flag (left | right | center; null = default). */
+function parseAlign(value: string | undefined): Align | null {
+  if (value === undefined) return null
+  if (value === 'left' || value === 'right' || value === 'center') return value
+  throw new Error('--align must be left, right, or center')
+}
+
+/** Print a handled table-op error and set a failing exit code; returns true if handled. */
+function reportTableError(e: unknown): boolean {
+  if (e instanceof RevConflictError) {
+    console.error(
+      `Conflict: the page changed since it was read (current rev ${e.currentRev}). Re-read and retry.`,
+    )
+    process.exitCode = 1
+    return true
+  }
+  if (e instanceof TableError) {
+    console.error(e.message)
+    process.exitCode = 1
+    return true
+  }
+  return false
+}
+
+/** Print a handled section/replace edit error and fail the exit code; true if handled. */
+function reportEditError(e: unknown): boolean {
+  if (e instanceof RevConflictError) {
+    console.error(
+      `Conflict: the page changed since it was read (current rev ${e.currentRev}). Re-read and retry.`,
+    )
+    process.exitCode = 1
+    return true
+  }
+  if (e instanceof EditError) {
+    console.error(e.message)
+    process.exitCode = 1
+    return true
+  }
+  return false
+}
+
+/** `bctx wiki table get|set|add-row|rm-row` — edit a GFM table by cell/row (no body rewrite). */
+function tableCommand(): Command {
+  const table = new Command('table').description(
+    'Edit a GFM table inside a page body by cell/row — no whole-body rewrite.',
+  )
+  const locatorOpts = (c: Command): Command =>
+    c
+      .option('--caption <text>', 'heading above the table (to pick one of several)')
+      .option('--table-index <n>', '0-based table index on the page')
+
+  locatorOpts(table.command('get <ref>'))
+    .description('Read a table as structured rows (header + rows + rev, no page body).')
+    .option('--json', 'output JSON')
+    .action(async (ref: string, opts, command: Command) => {
+      const loc: TableLocator = {
+        caption: opts.caption,
+        tableIndex: parseTableIndex(opts.tableIndex),
+      }
+      try {
+        const view = await withDb(dbOptsFrom(command), (db) => tableGet(db, ref, loc))
+        if (opts.json) {
+          console.log(JSON.stringify(view, null, 2))
+          return
+        }
+        const heading = view.headingAbove ? ` — ${view.headingAbove}` : ''
+        console.log(
+          `[${view.slug ?? view.pageId}] table #${view.tableIndex}${heading}  rev ${view.rev}`,
+        )
+        console.log(serializeTable(view))
+      } catch (e) {
+        if (!reportTableError(e)) throw e
+      }
+    })
+
+  locatorOpts(table.command('set <ref>'))
+    .description('Set one cell (addressed by --row + --col), leaving the rest byte-identical.')
+    .requiredOption('--row <key>', 'first-column value of the row (or a 0-based ordinal)')
+    .requiredOption('--col <name>', 'column header name (or a 0-based ordinal)')
+    .requiredOption('--value <text>', 'the new cell value')
+    .option('--if-rev <rev>', 'only apply if the page rev still matches (optimistic concurrency)')
+    .option('--agent <name>', 'agent source label for this change')
+    .option('--json', 'output JSON')
+    .action(async (ref: string, opts, command: Command) => {
+      const loc: TableLocator = {
+        caption: opts.caption,
+        tableIndex: parseTableIndex(opts.tableIndex),
+      }
+      try {
+        const page = await withDb(dbOptsFrom(command), (db) =>
+          tableSetCell(db, ref, loc, opts.row, opts.col, opts.value, {
+            ifRev: opts.ifRev,
+            agentSource: resolveAgent(opts.agent),
+          }),
+        )
+        console.log(
+          opts.json
+            ? JSON.stringify(page, null, 2)
+            : `Updated cell in "${page.title}" (rev ${page.rev})`,
+        )
+      } catch (e) {
+        if (!reportTableError(e)) throw e
+      }
+    })
+
+  locatorOpts(table.command('add-row <ref>'))
+    .description('Append a row; --cells are given in header order.')
+    .requiredOption('--cells <a,b,c>', 'comma-separated cell values in header order')
+    .option('--if-rev <rev>', 'only apply if the page rev still matches (optimistic concurrency)')
+    .option('--agent <name>', 'agent source label for this change')
+    .option('--json', 'output JSON')
+    .action(async (ref: string, opts, command: Command) => {
+      const loc: TableLocator = {
+        caption: opts.caption,
+        tableIndex: parseTableIndex(opts.tableIndex),
+      }
+      try {
+        const page = await withDb(dbOptsFrom(command), (db) =>
+          tableAddRow(db, ref, loc, splitCsv(opts.cells) ?? [], {
+            ifRev: opts.ifRev,
+            agentSource: resolveAgent(opts.agent),
+          }),
+        )
+        console.log(
+          opts.json
+            ? JSON.stringify(page, null, 2)
+            : `Added row to "${page.title}" (rev ${page.rev})`,
+        )
+      } catch (e) {
+        if (!reportTableError(e)) throw e
+      }
+    })
+
+  locatorOpts(table.command('rm-row <ref>'))
+    .description('Delete the row matching --row (first-column value or ordinal).')
+    .requiredOption('--row <key>', 'first-column value of the row (or a 0-based ordinal)')
+    .option('--if-rev <rev>', 'only apply if the page rev still matches (optimistic concurrency)')
+    .option('--agent <name>', 'agent source label for this change')
+    .option('--json', 'output JSON')
+    .action(async (ref: string, opts, command: Command) => {
+      const loc: TableLocator = {
+        caption: opts.caption,
+        tableIndex: parseTableIndex(opts.tableIndex),
+      }
+      try {
+        const page = await withDb(dbOptsFrom(command), (db) =>
+          tableDeleteRow(db, ref, loc, opts.row, {
+            ifRev: opts.ifRev,
+            agentSource: resolveAgent(opts.agent),
+          }),
+        )
+        console.log(
+          opts.json
+            ? JSON.stringify(page, null, 2)
+            : `Deleted row from "${page.title}" (rev ${page.rev})`,
+        )
+      } catch (e) {
+        if (!reportTableError(e)) throw e
+      }
+    })
+
+  locatorOpts(table.command('add-col <ref>'))
+    .description('Insert a column (appends unless --at); every row gets an empty cell.')
+    .requiredOption('--name <text>', 'the new column header')
+    .option('--at <n>', '0-based position to insert at (default: append at the end)')
+    .option('--align <dir>', 'column alignment: left | right | center')
+    .option('--if-rev <rev>', 'only apply if the page rev still matches (optimistic concurrency)')
+    .option('--agent <name>', 'agent source label for this change')
+    .option('--json', 'output JSON')
+    .action(async (ref: string, opts, command: Command) => {
+      const loc: TableLocator = {
+        caption: opts.caption,
+        tableIndex: parseTableIndex(opts.tableIndex),
+      }
+      try {
+        const page = await withDb(dbOptsFrom(command), (db) =>
+          tableAddColumn(
+            db,
+            ref,
+            loc,
+            { name: opts.name, at: parseTableIndex(opts.at), align: parseAlign(opts.align) },
+            { ifRev: opts.ifRev, agentSource: resolveAgent(opts.agent) },
+          ),
+        )
+        console.log(
+          opts.json
+            ? JSON.stringify(page, null, 2)
+            : `Added column "${opts.name}" to "${page.title}" (rev ${page.rev})`,
+        )
+      } catch (e) {
+        if (!reportTableError(e)) throw e
+      }
+    })
+
+  locatorOpts(table.command('rm-col <ref>'))
+    .description('Delete a column by --col (header name or 0-based index).')
+    .requiredOption('--col <name>', 'column header name (or a 0-based index)')
+    .option('--if-rev <rev>', 'only apply if the page rev still matches (optimistic concurrency)')
+    .option('--agent <name>', 'agent source label for this change')
+    .option('--json', 'output JSON')
+    .action(async (ref: string, opts, command: Command) => {
+      const loc: TableLocator = {
+        caption: opts.caption,
+        tableIndex: parseTableIndex(opts.tableIndex),
+      }
+      try {
+        const page = await withDb(dbOptsFrom(command), async (db) => {
+          const col = await resolveCliColumn(db, ref, loc, opts.col)
+          return tableDeleteColumn(db, ref, loc, col, {
+            ifRev: opts.ifRev,
+            agentSource: resolveAgent(opts.agent),
+          })
+        })
+        console.log(
+          opts.json
+            ? JSON.stringify(page, null, 2)
+            : `Deleted column from "${page.title}" (rev ${page.rev})`,
+        )
+      } catch (e) {
+        if (!reportTableError(e)) throw e
+      }
+    })
+
+  locatorOpts(table.command('rename-col <ref>'))
+    .description('Rename a column header (--col names the current header or a 0-based index).')
+    .requiredOption('--col <name>', 'current column header name (or a 0-based index)')
+    .requiredOption('--name <text>', 'the new column header')
+    .option('--if-rev <rev>', 'only apply if the page rev still matches (optimistic concurrency)')
+    .option('--agent <name>', 'agent source label for this change')
+    .option('--json', 'output JSON')
+    .action(async (ref: string, opts, command: Command) => {
+      const loc: TableLocator = {
+        caption: opts.caption,
+        tableIndex: parseTableIndex(opts.tableIndex),
+      }
+      try {
+        const page = await withDb(dbOptsFrom(command), async (db) => {
+          const col = await resolveCliColumn(db, ref, loc, opts.col)
+          return tableRenameColumn(db, ref, loc, col, opts.name, {
+            ifRev: opts.ifRev,
+            agentSource: resolveAgent(opts.agent),
+          })
+        })
+        console.log(
+          opts.json
+            ? JSON.stringify(page, null, 2)
+            : `Renamed column to "${opts.name}" in "${page.title}" (rev ${page.rev})`,
+        )
+      } catch (e) {
+        if (!reportTableError(e)) throw e
+      }
+    })
+
+  return table
+}
+
+/** Resolve a column reference (header name or ordinal) to an index for CLI column ops. */
+async function resolveCliColumn(
+  db: Parameters<typeof tableGet>[0],
+  ref: string,
+  loc: TableLocator,
+  colRef: string,
+): Promise<number> {
+  const view = await tableGet(db, ref, loc)
+  const col = columnIndex(view, colRef)
+  if (col < 0) {
+    throw new TableError(`no column "${colRef}" (headers: ${view.header.join(', ') || '<none>'})`)
+  }
+  return col
 }

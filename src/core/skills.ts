@@ -1,6 +1,6 @@
 import type { Kysely } from 'kysely'
 import { ulid } from 'ulidx'
-import { type Context, deleteContextChildren, getContext, listContexts } from './contexts'
+import { type Context, deleteContextChildren, getContext, listContexts, revOf } from './contexts'
 import { withWriteRetry } from './tx'
 import type { Database } from './types'
 
@@ -136,6 +136,11 @@ export async function importSkill(db: Kysely<Database>, input: ImportSkillInput)
     createdAt: ts,
     updatedAt: ts,
     deletedAt: null,
+    rev: revOf({
+      title: input.name,
+      body: input.body,
+      metadata: JSON.stringify(input.frontmatter ?? {}),
+    }),
   }
 }
 

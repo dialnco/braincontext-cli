@@ -7,6 +7,7 @@
  * These run in the browser (they use the DOM), but stay free of React/editor state
  * so they're unit-testable with jsdom.
  */
+import { type Align, isTableDelim, serializeTable, splitRow } from '@core/lib/mdtable'
 import { S } from './theme'
 import { wlSpan } from './wikilinks'
 
@@ -69,20 +70,28 @@ export function htmlToMarkdown(html: string): string {
       for (const li of el.querySelectorAll(':scope > li')) out.push(`${i++}. ${inline(li)}`)
     } else if (t === 'PRE') out.push(`\`\`\`\n${el.textContent?.replace(/\n+$/, '')}\n\`\`\``)
     else if (t === 'TABLE') {
-      const rows = [...el.querySelectorAll('tr')]
-      if (rows.length) {
-        const lines: string[] = []
-        rows.forEach((tr, ri) => {
-          const cells = [...tr.children].map((c) =>
-            inline(c).trim().replace(/\|/g, '\\|').replace(/\n/g, ' '),
-          )
-          lines.push(`| ${cells.join(' | ')} |`)
-          if (ri === 0) lines.push(`| ${cells.map(() => '---').join(' | ')} |`)
+      // Delegate framing/escaping/alignment to the shared serializer (one grammar with
+      // the CLI); alignment survives via the data-align stamped on header cells.
+      const trs = [...el.querySelectorAll('tr')]
+      const head = trs[0]
+      if (head) {
+        const cellText = (c: Element) => inline(c).trim()
+        const header = [...head.children].map(cellText)
+        const alignments = [...head.children].map((c) => {
+          const a = (c as HTMLElement).getAttribute('data-align')
+          return a === 'left' || a === 'right' || a === 'center' ? a : null
         })
-        out.push(lines.join('\n'))
+        const bodyRows = trs.slice(1).map((tr) => [...tr.children].map(cellText))
+        out.push(serializeTable({ header, alignments, rows: bodyRows }))
       }
     } else if (t === 'HR') out.push('---')
     else if (t === 'DIV') {
+      // An embed placeholder round-trips to its `![[Title]]` marker — never serialize the
+      // hydrated table inside it (that would inline the datatable into the consuming page).
+      if (el.hasAttribute('data-embed-title')) {
+        out.push(`![[${el.getAttribute('data-embed-title')}]]`)
+        return
+      }
       const box = el.querySelector(':scope > .task-box')
       if (/accent-soft/.test(st) && el.querySelector('p')) {
         const label = (el.firstElementChild?.textContent || '').replace(/[^A-Za-z]/g, '') || 'note'
@@ -150,13 +159,23 @@ export function markdownToHtml(md: string, resolveTitle: (title: string) => stri
       blocks.push(`<pre style="${S.code}">${esc(buf.join('\n'))}</pre>`)
       continue
     }
+    // A transclusion on its own line — `![[Title]]` — becomes a non-editable embed placeholder
+    // that WikiEditor hydrates with the referenced datatable's rendered table. The wrapper keeps
+    // the title so htmlToMarkdown re-emits `![[Title]]` verbatim (autosave never clobbers it).
+    const embedMatch = /^\s*!\[\[\s*([^\]|]+?)\s*(?:\|[^\]]*)?\]\]\s*$/.exec(line)
+    if (embedMatch?.[1]) {
+      blocks.push(embedHtml(embedMatch[1].trim()))
+      i++
+      continue
+    }
     // GFM table: a pipe row immediately followed by a `|---|---|` delimiter row.
     if (line.includes('|') && isTableDelim(at(i + 1))) {
       const header = splitRow(line)
+      const alignments = splitRow(at(i + 1)).map(alignOf)
       i += 2 // header + delimiter
       const rows: string[][] = []
       while (i < lines.length && at(i).trim() && at(i).includes('|')) rows.push(splitRow(at(i++)))
-      blocks.push(tableHtml(header, rows, renderInline))
+      blocks.push(tableHtml(header, rows, alignments, renderInline))
       continue
     }
     if (/^#\s/.test(line)) blocks.push(`<h1 style="${S.h1}">${renderInline(line.slice(2))}</h1>`)
@@ -188,37 +207,40 @@ export function markdownToHtml(md: string, resolveTitle: (title: string) => stri
   return blocks.join('\n') || `<p style="${S.p}"><br></p>`
 }
 
-/** True if `s` is a GFM table delimiter row (e.g. `|---|:--:|`), not a `---` rule. */
-function isTableDelim(s: string): boolean {
-  const t = (s ?? '').trim()
-  if (!t.includes('|') || !t.includes('-')) return false
-  return splitRow(t).every((c) => /^:?-+:?$/.test(c))
-}
-
-/** Split a table row into trimmed cells, dropping optional outer pipes and
- *  honouring escaped `\|` so it round-trips with the serializer. */
-function splitRow(s: string): string[] {
-  return s
-    .trim()
-    .replace(/^\|/, '')
-    .replace(/\|$/, '')
-    .split(/(?<!\\)\|/)
-    .map((c) => c.trim().replace(/\\\|/g, '|'))
+/** Column alignment from a GFM delimiter cell (`:--` left, `:-:` center, `--:` right). */
+function alignOf(cell: string): Align | null {
+  const l = cell.startsWith(':')
+  const r = cell.endsWith(':')
+  return l && r ? 'center' : r ? 'right' : l ? 'left' : null
 }
 
 function tableHtml(
   header: string[],
   rows: string[][],
+  alignments: Array<Align | null>,
   renderInline: (text: string) => string,
 ): string {
-  const head = header.map((c) => `<th style="${S.th}">${renderInline(c)}</th>`).join('')
+  // Stamp text-align (visual) + data-align (so htmlToMarkdown re-emits the alignment) +
+  // data-r/data-c (so the editor can address a single cell without re-serializing the body).
+  const styleFor = (ci: number) => `${S.td}${alignments[ci] ? `;text-align:${alignments[ci]}` : ''}`
+  const head = header
+    .map(
+      (c, ci) =>
+        `<th style="${S.th}${alignments[ci] ? `;text-align:${alignments[ci]}` : ''}" data-align="${alignments[ci] ?? ''}" data-c="${ci}">${renderInline(c)}</th>`,
+    )
+    .join('')
   const body = rows
     .map(
-      (r) =>
-        `<tr>${header.map((_, ci) => `<td style="${S.td}">${renderInline(r[ci] ?? '')}</td>`).join('')}</tr>`,
+      (r, ri) =>
+        `<tr>${header.map((_, ci) => `<td style="${styleFor(ci)}" data-r="${ri}" data-c="${ci}">${renderInline(r[ci] ?? '')}</td>`).join('')}</tr>`,
     )
     .join('')
   return `<table style="${S.table}"><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table>`
+}
+
+/** A non-editable placeholder for a `![[Title]]` embed; WikiEditor hydrates the table into it. */
+function embedHtml(title: string): string {
+  return `<div class="embed" data-embed-title="${esc(title)}" contenteditable="false" style="margin:0 0 20px;border:1px solid var(--border);border-radius:11px;overflow:hidden;"><div style="display:flex;align-items:center;gap:8px;padding:9px 14px;background:var(--code-bg);border-bottom:1px solid var(--border);font:600 12px/1 'IBM Plex Mono',monospace;color:var(--muted);"><span>▦ ${esc(title)}</span></div><div style="padding:12px 14px;font:400 14px/1.5 'Spectral',serif;color:var(--muted);">Loading embedded table…</div></div>`
 }
 
 function taskHtml(inner: string, checked: boolean): string {

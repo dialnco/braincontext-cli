@@ -47,6 +47,72 @@ you don't get bored, so it's **yours**.
   `references` edge automatically; an unknown `[[Title]]` becomes a **wanted** (red) link that `lint` surfaces.
 - For explicit semantic edges use `bctx wiki link <from> <to> --type <relates|supersedes|part-of|mentions|source>`.
 
+## Editing tables (cell/row ops — don't rewrite the whole body)
+
+Editing a markdown table the naive way (fetch the full body, re-emit the whole table, PATCH
+it back) burns output tokens and often corrupts the other rows. Edit it in place instead:
+
+- `bctx wiki table get "<ref>"` (MCP: `wiki_table_get`) — read a table as structured rows +
+  a `rev`. Pass that `rev` back as `--if-rev` / `ifRev` so a concurrent edit is caught, not
+  silently clobbered.
+- `bctx wiki table set "<ref>" --row <key> --col <name> --value <v>` (MCP:
+  `wiki_table_set_cell`) — change ONE cell; every other cell stays byte-identical.
+- `bctx wiki table add-row "<ref>" --cells a,b,c` / `bctx wiki table rm-row "<ref>" --row <key>`
+  (MCP: `wiki_table_add_row` / `wiki_table_delete_row`).
+
+Rows are addressed by first-column value (or a 0-based ordinal), columns by header name;
+pick among multiple tables with `--caption` (the heading above it) or `--table-index`. Reach
+for a table op when the data is queried, mutated field-by-field, or shared across pages; a
+one-off illustrative list can stay plain markdown.
+
+## Datatables (one table, embedded in many pages)
+
+When the SAME table belongs on several pages, don't copy it — make it a **datatable** and
+embed it. A datatable is a page whose whole body is one canonical table, so all the table
+ops above work on it, and it's searchable/peekable like any page.
+
+- `bctx wiki datatable new "<Title>" --columns "Name,Status" --row "Acme,active"` (MCP:
+  `wiki_datatable_new`) — create it (repeat `--row` for more rows).
+- In any other page body, write `![[<Title>]]` (note the leading `!`) to **embed** it. On
+  read, `wiki get`/`wiki_get {detail:"full"}` inlines the datatable's current table where the
+  `![[..]]` sits; `--peek` (and `--no-embed`) leave it as a reference. The embed is an
+  `embeds` edge, so `lint`/backlinks show every page that consumes the datatable.
+- Edit the datatable ONCE (`wiki table set …`) and every page that `![[..]]`-embeds it
+  reflects the change — no per-page rewrite. Use this whenever a table is the single source
+  of truth for facts reused across pages.
+
+## Properties & views (query pages like a database)
+
+Give pages typed **properties** and you can query the wiki as a small database instead of
+grepping bodies.
+
+- Set props when creating: `bctx wiki new "Auth" --type concept --prop status=active --prop priority=3`
+  (MCP: `props` on `wiki_new`/`wiki_update`). One at a time: `bctx wiki set-prop "Auth" --key status --value done`
+  (MCP: `wiki_set_prop`; value `null` deletes the key). Values are typed (number/boolean inferred).
+- Discover what you can filter on: `bctx wiki list-properties` (MCP: `wiki_list_properties`).
+- Query: `bctx wiki query --where '{"status":"active","priority":{"gt":2}}'` (MCP: `wiki_query`).
+  Each `where` key is ANDed; a value is a scalar (exact match) or a condition object —
+  `{eq,ne,lt,gt,lte,gte,contains,in,exists}`. Add `--sort priority:desc --sort-numeric`.
+- Save a query as a **view**: `bctx wiki view new "Active work" --where '{"status":"active"}' --columns priority,area`
+  (MCP: `wiki_view_new`). A view is a page whose body is a live GFM table of the matching
+  pages — it re-renders every read, so it always reflects the current graph.
+
+## Editing prose (section / find-replace — don't rewrite the whole body)
+
+For a targeted text edit, don't `wiki get` the whole page and re-emit it — patch in place:
+
+- **One section:** `bctx wiki get "<ref>" --section "Config"` reads just that heading's slice
+  (MCP: `wiki_get {section}`); `bctx wiki patch-section "<ref>" --section "Config" --body ...`
+  replaces it (MCP: `wiki_patch_section`). Include the heading line in the new body to keep it.
+  A section runs to the next same-or-higher heading. Refuses if the heading is missing or matches
+  more than one place.
+- **One phrase/link/value:** `bctx wiki replace "<ref>" --find "old" --replace "new"` (MCP:
+  `wiki_replace`). EXACT-MATCH-OR-REFUSE — with no `--occurrence`, `--find` must occur exactly
+  once; if it appears N times, pass `--occurrence <n>` (1-based). A miss is an error, never a
+  silent no-op.
+
+Both re-sync `[[links]]` from the new text and take `--if-rev`/`ifRev` for compare-and-swap.
+
 ## Core loops
 
 ```bash

@@ -19,6 +19,25 @@ function strArray(v: unknown): string[] {
   return Array.isArray(v) ? v.filter((t): t is string => typeof t === 'string') : []
 }
 
+/**
+ * Reconstruct a page's metadata from the frontmatter blocks export writes back out:
+ * `props` (typed properties → the page_properties mirror), and for `view` pages the saved
+ * `query` + `columns`. Returns undefined when there's nothing to store.
+ */
+function metadataFrom(
+  data: Record<string, unknown>,
+  type: PageType,
+): Record<string, unknown> | undefined {
+  const md: Record<string, unknown> = {}
+  if (data.props && typeof data.props === 'object' && !Array.isArray(data.props))
+    md.props = data.props
+  if (type === 'view') {
+    if (data.query && typeof data.query === 'object') md.query = data.query
+    if (Array.isArray(data.columns)) md.columns = strArray(data.columns)
+  }
+  return Object.keys(md).length > 0 ? md : undefined
+}
+
 interface FmLink {
   type: string
   toSlug?: string
@@ -95,6 +114,7 @@ export async function importWiki(db: Kysely<Database>, dir: string): Promise<Imp
     const tags = strArray(p.data.tags)
     const createdAt = str(p.data.created)
     const updatedAt = str(p.data.updated)
+    const metadata = metadataFrom(p.data, p.type)
     const existing = await getPageBySlug(db, p.slug)
 
     if (existing) {
@@ -107,6 +127,7 @@ export async function importWiki(db: Kysely<Database>, dir: string): Promise<Imp
         body,
         addTags: tags.filter((t) => !existing.tags.includes(t)),
         removeTags: existing.tags.filter((t) => !tags.includes(t)),
+        setMetadata: metadata,
       })
       idBySlug.set(p.slug, existing.id)
       updated++
@@ -130,6 +151,7 @@ export async function importWiki(db: Kysely<Database>, dir: string): Promise<Imp
         namespace: 'wiki',
         createdAt,
         updatedAt,
+        metadata,
       })
       idBySlug.set(p.slug, page.id)
       created++

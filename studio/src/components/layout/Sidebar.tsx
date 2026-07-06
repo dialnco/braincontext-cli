@@ -5,7 +5,17 @@ import { pageTypeGlyph, pageTypeLabel } from '../../lib/theme'
 import { buildPageTree, type TreeFolder } from '../../lib/tree'
 
 /** Sidebar order for the page-type groups (the wiki taxonomy as "folders"). */
-const GROUP_ORDER = ['index', 'entity', 'concept', 'summary', 'comparison', 'analysis', 'source']
+const GROUP_ORDER = [
+  'index',
+  'entity',
+  'concept',
+  'summary',
+  'comparison',
+  'analysis',
+  'datatable',
+  'view',
+  'source',
+]
 
 const baseRow =
   'display:flex;align-items:center;gap:6px;padding:4px 9px;margin:1px 4px;border-radius:7px;cursor:pointer;transition:background .12s;'

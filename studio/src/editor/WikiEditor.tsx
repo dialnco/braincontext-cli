@@ -1,6 +1,8 @@
 import type React from 'react'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { Context } from '../api/types'
+import { wikiApi } from '../api/wiki'
+import { ConfirmDialog } from '../components/common/ConfirmDialog'
 import {
   BLOCK_OPTIONS,
   type BlockType,
@@ -77,6 +79,86 @@ interface Props {
   handleRef?: React.MutableRefObject<WikiEditorHandle | null>
 }
 
+/** A small "✕ Remove" button that drops this `![[..]]` embed from the consuming page. */
+function embedRemoveBtn(onRemove: () => void): HTMLButtonElement {
+  const rm = document.createElement('button')
+  rm.type = 'button'
+  rm.setAttribute('contenteditable', 'false')
+  rm.title = 'Remove this embed from the page (the linked table is kept)'
+  rm.setAttribute(
+    'style',
+    "cursor:pointer;font:600 11px 'IBM Plex Mono',monospace;color:#b4533f;background:transparent;border:1px solid var(--border);border-radius:7px;padding:3px 9px;",
+  )
+  rm.textContent = '✕ Remove'
+  rm.addEventListener('click', (e) => {
+    e.preventDefault()
+    e.stopPropagation()
+    onRemove()
+  })
+  return rm
+}
+
+/** Fill an embed placeholder with a header (title + Open-to-edit) and, if given, a rendered table. */
+function renderEmbedOpen(
+  node: HTMLElement,
+  target: Context,
+  resolveTitle: (title: string) => string,
+  onOpen: (id: string) => void,
+  altLabel?: string,
+  body?: string,
+  onRemove?: () => void,
+): void {
+  node.innerHTML = ''
+  const head = document.createElement('div')
+  head.setAttribute(
+    'style',
+    'display:flex;align-items:center;gap:8px;padding:9px 14px;background:var(--code-bg);border-bottom:1px solid var(--border);',
+  )
+  const label = document.createElement('span')
+  label.setAttribute('style', "font:600 12px/1 'IBM Plex Mono',monospace;color:var(--muted);")
+  label.textContent = `▦ ${target.title ?? ''}`
+  const spacer = document.createElement('span')
+  spacer.setAttribute('style', 'flex:1;')
+  const btn = document.createElement('button')
+  btn.type = 'button'
+  btn.setAttribute('contenteditable', 'false')
+  btn.setAttribute(
+    'style',
+    "cursor:pointer;font:600 11px 'IBM Plex Mono',monospace;color:var(--accent-ink);background:transparent;border:1px solid var(--border);border-radius:7px;padding:3px 10px;",
+  )
+  btn.textContent = altLabel ?? 'Open to edit ↗'
+  btn.addEventListener('click', (e) => {
+    e.preventDefault()
+    e.stopPropagation()
+    onOpen(target.id)
+  })
+  head.append(label, spacer)
+  if (onRemove) head.append(embedRemoveBtn(onRemove))
+  head.append(btn)
+  node.appendChild(head)
+  if (body !== undefined) {
+    const wrap = document.createElement('div')
+    wrap.innerHTML = markdownToHtml(body, resolveTitle)
+    node.appendChild(wrap)
+  }
+}
+
+/** Fill an embed placeholder with a plain note (unresolved / wanted embed) + a remove affordance. */
+function renderEmbedNote(node: HTMLElement, msg: string, onRemove?: () => void): void {
+  node.innerHTML = ''
+  const d = document.createElement('div')
+  d.setAttribute(
+    'style',
+    "display:flex;align-items:center;gap:8px;padding:11px 14px;font:400 13px/1.5 'IBM Plex Mono',monospace;color:var(--muted);",
+  )
+  const span = document.createElement('span')
+  span.setAttribute('style', 'flex:1;')
+  span.textContent = msg
+  d.append(span)
+  if (onRemove) d.append(embedRemoveBtn(onRemove))
+  node.appendChild(d)
+}
+
 /**
  * The braincontext wiki editor: a contenteditable surface that loads a page body
  * (markdown → styled HTML), and on edit debounces a 10s autosave of the body back
@@ -114,6 +196,11 @@ export function WikiEditor({
   const [words, setWords] = useState(0)
   const [tokens, setTokens] = useState(0)
   const [mdCopied, setMdCopied] = useState(false)
+  // A `![[..]]` embed the user asked to remove, pending confirm (the linked table is kept).
+  const [pendingEmbedRemove, setPendingEmbedRemove] = useState<{
+    node: HTMLElement
+    title: string
+  } | null>(null)
 
   const pagesRef = useRef(pages)
   pagesRef.current = pages
@@ -152,6 +239,75 @@ export function WikiEditor({
     return () => ro.disconnect()
   }, [sizeTables])
 
+  // Fill each `![[Title]]` embed placeholder with the referenced datatable's rendered table
+  // (read-only) + an "Open to edit" header that jumps to its grid editor. The stored body keeps
+  // the `![[Title]]` marker (the wrapper is contenteditable=false and htmlToMarkdown re-emits it),
+  // so hydrating here never rewrites the consuming page. Fetches fresh so edits elsewhere show.
+  const hydrateEmbeds = useCallback(() => {
+    const ed = edRef.current
+    if (!ed) return
+    const cache = new Map<string, Promise<Context | null>>()
+    for (const node of ed.querySelectorAll<HTMLElement>('[data-embed-title]')) {
+      if (node.dataset.embedHydrated === '1') continue
+      const title = node.getAttribute('data-embed-title') ?? ''
+      // On editable pages, every embed carries a "✕ Remove" that drops its `![[..]]` marker.
+      const onRemove = readOnly ? undefined : () => setPendingEmbedRemove({ node, title })
+      const target = pagesRef.current.find(
+        (p) => (p.title ?? '').toLowerCase() === title.trim().toLowerCase(),
+      )
+      if (!target) {
+        // The page list may not have loaded yet (initial mount / hard reload). Don't lock in the
+        // "no such page" note in that case — leave the node UNHYDRATED so the pages-change effect
+        // below re-resolves it once the list arrives. Only mark hydrated when pages are actually
+        // loaded and the title genuinely has no match.
+        renderEmbedNote(node, `⚠ no page titled “${title}”`, onRemove)
+        if (pagesRef.current.length > 0) node.dataset.embedHydrated = '1'
+        continue
+      }
+      node.dataset.embedHydrated = '1'
+      if (target.pageType !== 'datatable') {
+        renderEmbedOpen(
+          node,
+          target,
+          resolveTitle,
+          onOpenPage,
+          '(not a datatable — open)',
+          undefined,
+          onRemove,
+        )
+        continue
+      }
+      let pending = cache.get(target.id)
+      if (!pending) {
+        pending = wikiApi.get(target.id).catch(() => null)
+        cache.set(target.id, pending)
+      }
+      void pending.then((full) => {
+        if (!node.isConnected) return
+        renderEmbedOpen(
+          node,
+          target,
+          resolveTitle,
+          onOpenPage,
+          undefined,
+          full?.body ?? target.body,
+          onRemove,
+        )
+        sizeTables()
+      })
+    }
+  }, [resolveTitle, onOpenPage, sizeTables, readOnly])
+
+  // Re-resolve embeds when the page list arrives or changes. On a hard reload the load effect
+  // hydrates before `pages` has loaded, so `![[Title]]` embeds can't find their target and fall
+  // back to the "no such page" note; re-running hydration once the list is available resolves
+  // them (already-resolved nodes are skipped). Navigating away and back masked this by rebuilding
+  // the editor HTML after pages had loaded — this makes a plain reload behave the same.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: re-run on the pages-list identity
+  useEffect(() => {
+    hydrateEmbeds()
+  }, [pages, hydrateEmbeds])
+
   const autosave = useAutosave(onSave)
   useEffect(() => {
     if (handleRef) handleRef.current = { flush: autosave.flush, isDirty: autosave.isDirty }
@@ -176,6 +332,7 @@ export function WikiEditor({
     setWords((ed.textContent?.trim().match(/\S+/g) || []).length)
     setTokens(estimateTokens(page.body))
     sizeTables()
+    hydrateEmbeds()
   }, [page.id])
 
   // Reflect EXTERNAL edits to the open page (an agent/CLI wrote it; the live-refresh
@@ -191,6 +348,7 @@ export function WikiEditor({
     setTokens(estimateTokens(page.body))
     if (dual) setMd(page.body)
     sizeTables()
+    hydrateEmbeds()
   }, [page.body])
 
   // Sync the dual-pane markdown source when it opens or the page changes. Without
@@ -983,6 +1141,21 @@ export function WikiEditor({
             <span>{preview.page.pageType}</span>
           </div>
         </div>
+      )}
+
+      {pendingEmbedRemove && (
+        <ConfirmDialog
+          heading="Remove embed"
+          message={`Remove the embedded “${pendingEmbedRemove.title}” table from this page? Only this reference is removed — the datatable itself is kept.`}
+          confirmLabel="Remove embed"
+          onConfirm={() => {
+            pendingEmbedRemove.node.remove()
+            setPendingEmbedRemove(null)
+            persist()
+            void autosave.flush()
+          }}
+          onCancel={() => setPendingEmbedRemove(null)}
+        />
       )}
     </div>
   )

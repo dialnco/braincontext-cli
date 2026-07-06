@@ -1,7 +1,7 @@
 import type { Kysely } from 'kysely'
 import { extractExcerpt, extractOutline } from '../lib/outline'
 import { estimateTokens } from '../lib/tokens'
-import { normalizeTitle, parseWikiLinks, slugify } from '../lib/wikilinks'
+import { normalizeTitle, parseTransclusions, parseWikiLinks, slugify } from '../lib/wikilinks'
 import {
   type Context,
   createContext,
@@ -12,8 +12,16 @@ import {
   type UpdateInput,
   updateContext,
 } from './contexts'
+import { type PropValue, readProps, rebuildPageProperties } from './properties'
+import { renderView, type WikiQuery } from './query'
 import { withWriteRetry } from './tx'
-import { type Database, type PageType, REFERENCES_LINK, type VerificationState } from './types'
+import {
+  type Database,
+  EMBEDS_LINK,
+  type PageType,
+  REFERENCES_LINK,
+  type VerificationState,
+} from './types'
 
 function nowIso(): string {
   return new Date().toISOString()
@@ -241,6 +249,94 @@ export async function updatePage(
   return updated
 }
 
+/**
+ * Set typed properties on a page (mirrored into `page_properties` for `wiki query`). By
+ * default MERGES into the page's existing props; pass `replace` to overwrite the whole set.
+ * A prop value of `null` deletes that key. Goes through `updatePage`, so history + CAS apply.
+ */
+export async function setPageProps(
+  db: Kysely<Database>,
+  id: string,
+  props: Record<string, PropValue | null>,
+  opts: { replace?: boolean; ifRev?: string; agentSource?: string | null } = {},
+): Promise<Context | null> {
+  const page = await getPage(db, id)
+  if (!page) return null
+  const base = opts.replace ? {} : readProps(page.metadata)
+  const next: Record<string, PropValue> = { ...base }
+  for (const [k, v] of Object.entries(props)) {
+    if (v === null) delete next[k]
+    else next[k] = v
+  }
+  return updatePage(db, id, {
+    setMetadata: { props: next },
+    ifRev: opts.ifRev,
+    agentSource: opts.agentSource,
+  })
+}
+
+export interface CreateViewInput {
+  title: string
+  query: WikiQuery
+  columns: string[]
+  namespace?: string
+  tags?: string[]
+  agentSource?: string | null
+}
+
+/**
+ * Create a saved view: a `view` page whose metadata holds a query + column list and whose
+ * body is a rendered GFM table of the matching pages. The body is regenerated on read/export
+ * (see wiki_get / export), so it always reflects the current graph.
+ */
+export async function createView(db: Kysely<Database>, input: CreateViewInput): Promise<Context> {
+  const metadata = { query: input.query, columns: input.columns }
+  const body = await renderView(db, metadata)
+  return createPage(db, {
+    title: input.title,
+    pageType: 'view',
+    body,
+    namespace: input.namespace,
+    tags: input.tags,
+    agentSource: input.agentSource,
+    metadata,
+  })
+}
+
+export interface ReindexResult {
+  pages: number
+  /** Pages that had at least one typed property mirrored. */
+  propsRebuilt: number
+  /** Whether the typed-link graph was also re-derived. */
+  linksResynced: boolean
+}
+
+/**
+ * Repair pass: re-derive computed state from the authoritative body + metadata of every wiki
+ * page, so existing entries reflect the current implementation after a schema/parser change.
+ * Rebuilds the `page_properties` mirror for all pages (used by `wiki query` / views). With
+ * `links`, ALSO re-runs `syncBodyLinks` to re-derive the `[[references]]` / `![[embeds]]`
+ * graph — EXCEPT for `source` pages, which are ingest-only: `recordSource` never derives link
+ * edges from their raw bodies and `updatePage` refuses them, so re-syncing a source would
+ * fabricate spurious `references` from `[[..]]`-like text in code/docs (e.g. `[[nodiscard]]`).
+ * Idempotent, and it does NOT touch the pages themselves (no `updated_at` churn) — only the
+ * derived tables — so it's safe to run repeatedly. Returns what it rebuilt.
+ */
+export async function reindexWiki(
+  db: Kysely<Database>,
+  opts: { links?: boolean } = {},
+): Promise<ReindexResult> {
+  const pages = await listPages(db, { limit: 1_000_000 })
+  let propsRebuilt = 0
+  for (const p of pages) {
+    // Mirror recordSource: sources never carry derived link edges, so leave them untouched.
+    if (opts.links && p.pageType !== 'source') await syncBodyLinks(db, p.id, p.body)
+    await withWriteRetry(db, (trx) => rebuildPageProperties(trx, p.id, JSON.stringify(p.metadata)))
+    if (Object.keys(readProps(p.metadata)).length > 0) propsRebuilt++
+  }
+  return { pages: pages.length, propsRebuilt, linksResynced: opts.links === true }
+}
+
 export async function listPages(
   db: Kysely<Database>,
   opts: { pageType?: string; namespace?: string; limit?: number } = {},
@@ -339,6 +435,8 @@ export async function verifyPage(
 
 export interface PagePeek {
   id: string
+  /** Content-hash revision handle (for `ifChangedSince` / compare-and-swap writes). */
+  rev: string
   slug: string | null
   title: string | null
   pageType: string | null
@@ -370,6 +468,7 @@ export async function pagePeek(
   const [outbound, back] = await Promise.all([outboundLinks(db, page.id), backlinks(db, page.id)])
   return {
     id: page.id,
+    rev: page.rev,
     slug: page.slug,
     title: page.title,
     pageType: page.pageType,
@@ -535,6 +634,15 @@ export async function syncBodyLinks(db: Kysely<Database>, id: string, body: stri
       .execute()
     for (const title of parseWikiLinks(body)) {
       await addLink(trx, id, { toTitle: title, type: REFERENCES_LINK })
+    }
+    // The parallel reserved channel: `![[Title]]` transclusion edges (datatable embeds).
+    await trx
+      .deleteFrom('links')
+      .where('from_id', '=', id)
+      .where('type', '=', EMBEDS_LINK)
+      .execute()
+    for (const title of parseTransclusions(body)) {
+      await addLink(trx, id, { toTitle: title, type: EMBEDS_LINK })
     }
   })
 }

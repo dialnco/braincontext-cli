@@ -16,6 +16,7 @@ import { Sidebar } from '../components/layout/Sidebar'
 import { TopBar } from '../components/layout/TopBar'
 import { HealthPanel } from '../components/wiki/HealthPanel'
 import { RightPanel } from '../components/wiki/RightPanel'
+import { DataTableEditor, type DataTableHandle } from '../editor/DataTableEditor'
 import { WikiEditor, type WikiEditorHandle } from '../editor/WikiEditor'
 import { Hov, sx } from '../lib/dc'
 import { freshnessColor, pageFreshness } from '../lib/freshness'
@@ -36,6 +37,9 @@ export function WikiView({ onNav }: { onNav: (v: 'wiki' | 'contexts') => void })
   const app = useApp()
   const route = useRoute()
   const editorRef = useRef<WikiEditorHandle | null>(null)
+  // Set only while a datatable grid is mounted — its presence is the "datatable active" signal
+  // that routes ⌘Z / ⌘⇧Z to the grid's history-backed undo/redo (prose keeps native ⌘Z).
+  const dtHandleRef = useRef<DataTableHandle | null>(null)
 
   const [layout, setLayout] = useState<Layout>('three')
   const [graphOpen, setGraphOpen] = useState(false)
@@ -222,10 +226,58 @@ export function WikiView({ onNav }: { onNav: (v: 'wiki' | 'contexts') => void })
     [activeId, tagFilter, pagesState, app],
   )
 
-  // Global ⌘K.
+  // Set (or delete, with null) one typed property, merged into the page's existing props and
+  // persisted via setMetadata — the derived page_properties mirror re-derives server-side.
+  const onSetProp = useCallback(
+    async (key: string, value: string | number | boolean | null) => {
+      if (!activeId) return
+      const current = detail.data?.page?.metadata?.props
+      const props: Record<string, unknown> =
+        current && typeof current === 'object' && !Array.isArray(current) ? { ...current } : {}
+      if (value === null) delete props[key]
+      else props[key] = value
+      try {
+        await wikiApi.update(activeId, { setMetadata: { props } })
+        setLocalRev((r) => r + 1)
+      } catch (e) {
+        app.toast(e instanceof Error ? e.message : 'Update field failed')
+      }
+    },
+    [activeId, detail.data, app],
+  )
+
+  // Restore the page body to a past revision's post-edit state (that history row's newBody).
+  // Goes through the anti-drift PATCH so it re-derives links/FTS and appends a labeled history
+  // row (agentSource:'restore') — the current version is preserved, so a restore is itself undoable.
+  const onRestoreRevision = useCallback(
+    async (entry: HistoryEntry) => {
+      if (!activeId || entry.newBody == null) return
+      try {
+        await editorRef.current?.flush() // avoid a pending autosave racing the restore
+        await wikiApi.update(activeId, {
+          body: entry.newBody,
+          ifRev: detail.data?.page?.rev,
+          agentSource: 'restore',
+        })
+        setLocalRev((r) => r + 1)
+        app.toast('Restored')
+      } catch (e) {
+        app.toast(e instanceof Error ? e.message : 'Restore failed')
+      }
+    },
+    [activeId, detail.data, app],
+  )
+
+  // Global ⌘K + datatable ⌘Z/⌘⇧Z (routed only while a datatable grid is mounted).
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if ((e.metaKey || e.ctrlKey) && (e.key === 'k' || e.key === 'K')) {
+      if ((e.metaKey || e.ctrlKey) && (e.key === 'z' || e.key === 'Z')) {
+        const h = dtHandleRef.current
+        if (!h) return // prose page → let the browser's native undo run
+        e.preventDefault()
+        if (e.shiftKey) h.redo()
+        else h.undo()
+      } else if ((e.metaKey || e.ctrlKey) && (e.key === 'k' || e.key === 'K')) {
         e.preventDefault()
         setPaletteOpen((o) => !o)
       } else if (e.key === 'Escape') {
@@ -240,7 +292,25 @@ export function WikiView({ onNav }: { onNav: (v: 'wiki' | 'contexts') => void })
   }, [])
 
   const page = detail.data?.page ?? null
-  const readOnly = page?.pageType === 'source'
+  // `source` is immutable; `view` and `index` bodies are generated (edits would be lost).
+  const readOnly =
+    page?.pageType === 'source' || page?.pageType === 'view' || page?.pageType === 'index'
+  // A datatable renders in a dedicated full-bleed grid editor (not the prose contenteditable).
+  const isDatatable = page?.pageType === 'datatable'
+
+  // On a datatable, collapse the right panel but KEEP the sidebar so the wiki stays navigable —
+  // the grid still takes the full remaining width in the 'dual' layout. Only forces on entry (so
+  // the TopBar layout toggle can still override); restores the three-pane layout on exit.
+  const forcedGridLayout = useRef(false)
+  useEffect(() => {
+    if (isDatatable && !forcedGridLayout.current) {
+      setLayout('dual')
+      forcedGridLayout.current = true
+    } else if (!isDatatable && forcedGridLayout.current) {
+      setLayout('three')
+      forcedGridLayout.current = false
+    }
+  }, [isDatatable])
   const commands: PaletteCommand[] = [
     {
       label: 'Toggle theme',
@@ -328,37 +398,37 @@ export function WikiView({ onNav }: { onNav: (v: 'wiki' | 'contexts') => void })
           )}
         >
           {page ? (
-            <div style={sx('flex:1;min-height:0;display:flex;flex-direction:column;')}>
-              <div
-                style={sx(
-                  `max-width:720px;${layout === 'dual' ? '' : 'margin:0 auto;'}width:100%;padding:30px 56px 0;`,
-                )}
-              >
+            isDatatable ? (
+              <div style={sx('flex:1;min-height:0;display:flex;flex-direction:column;')}>
+                {/* Slim full-width header (no 720px prose clamp) so the grid goes full-bleed. */}
                 <div
                   style={sx(
-                    'display:flex;align-items:center;gap:10px;margin-bottom:14px;min-height:24px;',
+                    'flex:0 0 auto;display:flex;align-items:center;gap:12px;padding:13px 22px;border-bottom:1px solid var(--border);',
                   )}
                 >
                   <span style={sx("font:400 12px 'IBM Plex Mono';color:var(--muted);")}>
-                    {page.pageType} {readOnly ? '· read-only source' : ''}
+                    datatable
                   </span>
-                  {page.pageType !== 'source' && page.pageType !== 'index' && (
-                    <FreshnessBadge page={page} />
-                  )}
+                  <div
+                    style={sx(
+                      "font:600 19px/1.2 'Spectral',serif;letter-spacing:-.01em;color:var(--ink);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:46vw;",
+                    )}
+                  >
+                    {page.title || 'Untitled'}
+                  </div>
+                  <FreshnessBadge page={page} />
                   <span style={sx('flex:1;')} />
-                  {page.pageType !== 'source' && page.pageType !== 'index' && (
-                    <Hov
-                      as="button"
-                      base={sx(
-                        "font:500 11px 'IBM Plex Mono';color:var(--accent-ink);background:transparent;border:1px solid var(--border);border-radius:7px;padding:4px 11px;cursor:pointer;",
-                      )}
-                      hover={sx('border-color:var(--accent);')}
-                      onClick={() => void onVerify()}
-                      title="Mark this page's content as just checked against reality"
-                    >
-                      Verify
-                    </Hov>
-                  )}
+                  <Hov
+                    as="button"
+                    base={sx(
+                      "font:500 11px 'IBM Plex Mono';color:var(--accent-ink);background:transparent;border:1px solid var(--border);border-radius:7px;padding:4px 11px;cursor:pointer;",
+                    )}
+                    hover={sx('border-color:var(--accent);')}
+                    onClick={() => void onVerify()}
+                    title="Mark this page's content as just checked against reality"
+                  >
+                    Verify
+                  </Hov>
                   <Hov
                     as="button"
                     base={sx(
@@ -371,27 +441,85 @@ export function WikiView({ onNav }: { onNav: (v: 'wiki' | 'contexts') => void })
                     Delete
                   </Hov>
                 </div>
+                <DataTableEditor
+                  key={page.id}
+                  page={page}
+                  readOnly={readOnly}
+                  onSaved={() => detail.reload()}
+                  handleRef={dtHandleRef}
+                />
+              </div>
+            ) : (
+              <div style={sx('flex:1;min-height:0;display:flex;flex-direction:column;')}>
                 <div
                   style={sx(
-                    "font:600 33px/1.18 'Spectral',serif;letter-spacing:-.014em;color:var(--ink);",
+                    `max-width:720px;${layout === 'dual' ? '' : 'margin:0 auto;'}width:100%;padding:30px 56px 0;`,
                   )}
                 >
-                  {page.title || 'Untitled'}
+                  <div
+                    style={sx(
+                      'display:flex;align-items:center;gap:10px;margin-bottom:14px;min-height:24px;',
+                    )}
+                  >
+                    <span style={sx("font:400 12px 'IBM Plex Mono';color:var(--muted);")}>
+                      {page.pageType}
+                      {readOnly
+                        ? page.pageType === 'source'
+                          ? ' · read-only source'
+                          : ' · generated'
+                        : ''}
+                    </span>
+                    {page.pageType !== 'source' && page.pageType !== 'index' && (
+                      <FreshnessBadge page={page} />
+                    )}
+                    <span style={sx('flex:1;')} />
+                    {page.pageType !== 'source' && page.pageType !== 'index' && (
+                      <Hov
+                        as="button"
+                        base={sx(
+                          "font:500 11px 'IBM Plex Mono';color:var(--accent-ink);background:transparent;border:1px solid var(--border);border-radius:7px;padding:4px 11px;cursor:pointer;",
+                        )}
+                        hover={sx('border-color:var(--accent);')}
+                        onClick={() => void onVerify()}
+                        title="Mark this page's content as just checked against reality"
+                      >
+                        Verify
+                      </Hov>
+                    )}
+                    <Hov
+                      as="button"
+                      base={sx(
+                        "font:500 11px 'IBM Plex Mono';color:#b4533f;background:transparent;border:1px solid var(--border);border-radius:7px;padding:4px 11px;cursor:pointer;",
+                      )}
+                      hover={sx('border-color:#b4533f;')}
+                      onClick={() => setPendingDelete(page)}
+                      title="Delete this page"
+                    >
+                      Delete
+                    </Hov>
+                  </div>
+                  <div
+                    style={sx(
+                      "font:600 33px/1.18 'Spectral',serif;letter-spacing:-.014em;color:var(--ink);",
+                    )}
+                  >
+                    {page.title || 'Untitled'}
+                  </div>
+                  <div style={sx('height:1px;background:var(--border);margin:18px 0 4px;')} />
                 </div>
-                <div style={sx('height:1px;background:var(--border);margin:18px 0 4px;')} />
+                <WikiEditor
+                  key={page.id}
+                  page={page}
+                  pages={pages}
+                  dual={layout === 'dual'}
+                  readOnly={readOnly}
+                  onSave={onSave}
+                  onOpenPage={flushThenNavigate}
+                  onCreatePage={createPage}
+                  handleRef={editorRef}
+                />
               </div>
-              <WikiEditor
-                key={page.id}
-                page={page}
-                pages={pages}
-                dual={layout === 'dual'}
-                readOnly={readOnly}
-                onSave={onSave}
-                onOpenPage={flushThenNavigate}
-                onCreatePage={createPage}
-                handleRef={editorRef}
-              />
-            </div>
+            )
           ) : pagesState.error || detail.error ? (
             <div
               style={sx(
@@ -446,6 +574,8 @@ export function WikiView({ onNav }: { onNav: (v: 'wiki' | 'contexts') => void })
             onTagClick={(t) => setTagFilter((prev) => (prev === t ? null : t))}
             onAddTag={onAddTag}
             onRemoveTag={onRemoveTag}
+            onSetProp={onSetProp}
+            onRestoreRevision={onRestoreRevision}
           />
         )}
 

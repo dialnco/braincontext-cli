@@ -2,6 +2,64 @@
 
 Tracking project progress across milestones. Update as work lands.
 
+## Studio datatable safety — confirm-delete + persistent undo/redo (shipped 2026-07-05)
+
+Prompted by an accidental whole-column delete in the Studio datatable grid (record
+`01KWT8482F8MX19ZPW8WYBN868`, **indicadores-clave-edumetrics** lost its `Fuente` column). The
+grid's delete-column fired with no confirmation and no undo. Recovered the column losslessly from
+`context_history` (the pre-delete `old_body`, byte-identical to the post-extract backup) via
+`wiki update --file --agent recovery`, then added two speed-bumps. No schema/migration — restores
+reuse the existing `event='update'` history rows, labeled via `agentSource`.
+
+- [x] **Generic `ConfirmDialog`** (`studio/src/components/common/ConfirmDialog.tsx`) — reuses the
+  ConfirmDeleteDialog scrim convention (inline `z-index:80` scrim, `mw-fade`/`mw-pop`,
+  Escape/scrim-click cancel) without the delete-specific soft/hard checkbox. `destructive` flag
+  toggles red vs accent confirm button.
+- [x] **Confirm before deleting a column** — the datatable grid's header `×` now opens
+  `ConfirmDialog` ("Remove '<col>' and all N of its cells? You can undo with ⌘Z.") instead of
+  firing the splice immediately. Cancel keeps the table; Confirm deletes.
+- [x] **Persistent, history-backed undo/redo** (⌘Z / ⌘⇧Z) in the grid — a client-owned revision
+  timeline (`histRef`/`curRef` in `DataTableEditor`) built from `wikiApi.history` `newBody`
+  snapshots, rebuilt only on pageId change / 409 (never oscillates over its own restore writes).
+  Undo/redo issue a labeled `updatePage` (`agentSource:'undo'|'redo'`) via the same `ifRev` CAS
+  path → server-persisted, survives reload. Routed from WikiView's document keydown only while a
+  datatable grid is mounted (`dtHandleRef !== null`); prose keeps native ⌘Z.
+- [x] **Clickable History-panel restore** (all page types incl. prose) — RightPanel History rows
+  gain a "↩ Restore" affordance (older revisions only) → `ConfirmDialog` →
+  `onRestoreRevision(entry)` = `wikiApi.update(id, {body: entry.newBody, ifRev: page.rev,
+  agentSource:'restore'})` → `detail.reload()`. Restoring a datatable reseeds the grid; a prose
+  revision re-renders the editor.
+- [x] **`ifRev` + `agentSource` threaded** on whole-body writes: `studio/src/api/wiki.ts`
+  `UpdatePageInput` + `src/studio/routes/wiki.ts` `updatePageBody` zod (`agentSource` optional),
+  passed into `updatePage`. Stale `ifRev` → 409 `{currentRev}`.
+- [x] **Tests + gate**: extended `test/studio-api.test.ts` (PATCH stale-`ifRev` → 409; a
+  `body`+`ifRev`+`agentSource:'restore'` write succeeds and appends a labeled history row). Full
+  gate green (typecheck + typecheck:studio + lint + 222 tests + build). Browser E2E on a seeded
+  isolated store verified all four: (a) delete-column confirm (Cancel keeps / Confirm deletes),
+  (b) grid ⌘Z/⌘⇧Z step through revisions with server body matching + persist across reload,
+  (c) History "Restore" reverts a prose page, (d) `undo`/`redo`/`restore` labels appear in History.
+- [x] **Datatable keeps the sidebar** — the datatable view now forces the `'dual'` layout
+  (sidebar + full-width grid) instead of `'focus'`, so the wiki stays navigable from a datatable;
+  the right panel still auto-hides for grid width, and the three-pane layout restores on exit.
+  Browser-verified the round-trip (datatable ⇄ prose sidebar navigation) keeps the sidebar and
+  restores the right panel off-datatable.
+- [x] **Remove an embedded datatable from a page** — a `![[Title]]` embed rendered in the prose
+  editor (`WikiEditor`) now carries a "✕ Remove" button in its header (and on the unresolved
+  `⚠ no page titled …` note), gated by a `ConfirmDialog` ("only this reference is removed — the
+  datatable itself is kept"). Confirm removes the `contenteditable=false` embed node and
+  `persist()`+`flush()`es the whole-body PATCH, which drops the `![[Title]]` marker and re-derives
+  the `embeds`/`wanted` links server-side. Button hidden on read-only pages. Browser-verified:
+  resolved + unresolved embeds both removable, marker dropped from the stored body, the referenced
+  datatable page + its rows survive, LINKS re-derived, and Cancel keeps the embed.
+- [x] **Fix: embed shows "no page titled" on hard reload** — `WikiEditor.hydrateEmbeds` resolved
+  `![[Title]]` against the `pages` prop, but on a hard reload the load effect hydrates before the
+  pages list finishes loading, so the embed fell back to the unresolved note AND eagerly set
+  `data-embed-hydrated`, locking it in until a full HTML rebuild (nav away/back). Fix: don't mark
+  hydrated when `pages` is still empty, and add a `[pages]` effect that re-runs `hydrateEmbeds`
+  when the list arrives (already-resolved nodes are skipped). Reproduced deterministically with a
+  15s one-shot delay on the pages-list fetch (temp `dist/studio/index.html` shim, since removed):
+  embed = NOTE while pages loading → flips to TABLE the instant pages resolve, no navigation.
+
 ## v1 — barebones (current)
 
 Stack: ESM + TypeScript · commander · better-sqlite3 + Kysely · FTS5 · ULID · zod · tsup · vitest · Biome. Binary: `bctx`.
@@ -292,3 +350,243 @@ React-hook tests (the data-loss-critical round-trip is covered server-side inste
 - [x] `prepublishOnly` now runs typecheck + studio typecheck + lint + test + build via `npm`
   (not hardcoded `pnpm`); version → **0.6.0**; `.github/workflows/ci.yml` added.
 - [x] `README` v4→v5 + Studio section; `LICENSE` shipped; this `progress.md` refresh.
+
+## vNext (design) — Structured data / "datatables" (not shipped; direction locked)
+
+A design exploration into a core mechanic — **agent-mutable structured tables** ("embed
+JSON instead of markdown tables; reference across pages; let agents search/mutate rows &
+fields"). Produced by a 12-agent design pass (5 independent proposals → adversarial
+code-grounded verification → completeness critic → synthesis). Every claim below is
+verified against the current code. **No code written yet** — this section is the direction
+of record; build follows the phased plan.
+
+### The real gap (reframing)
+
+Retrieval got sophisticated (disclosure ladder index→`peek`→`full`, `maxTokens`,
+tokenEstimate everywhere, FTS5/BM25 + link graph, no embeddings). **Mutation stayed
+whole-body**: `updateContext` replaces the entire `body` column (`src/core/contexts.ts:235`)
+and there is **no section/row/field patch anywhere** (CLI/MCP/Studio). Changing one cell of
+a 40-row table = fetch full body, regenerate the whole table, PATCH it back (expensive
+output tokens + LLM table-corruption risk). Tables are the weakest surface: opaque TEXT
+server-side; the only parser is browser-only and **lossy** (drops alignment,
+`studio/src/lib/markdown.ts`). **The datatable is the highest-structure instance of one
+axis: sub-document addressability.**
+
+### Verdict — YES, build it (qualified). Three qualifications are load-bearing:
+
+1. **No sidecar `datatable_rows` table.** It empties `contexts.body`, breaking what it
+   claims to inherit: `pagePeek` reads `body` (`wiki.ts:378`), `contexts_fts` mirrors only
+   `title+body` (`0001_init.ts:139`), `pageFreshness` keys on `updatedAt` (`wiki.ts:293`).
+   Keep canonical data **inside the single `contexts` row**.
+2. **No `page_type=NULL` blocks** — excluded from `wiki_search` (`page_type IS NOT NULL`),
+   so cell text becomes unfindable on the surface agents hit first.
+3. **Token win is agent-I/O only, not storage.** `context_history` logs full
+   `old_body`+`new_body` per update (`contexts.ts:292`); the row is the LWW sync unit.
+   Realistic warm reduction **~5–15×**, not 35×; sync/history bytes flat-to-worse. Framed
+   honestly, not oversold.
+
+> Writes are whole-row LWW and `tx.ts` serializes only per-Kysely-instance (MCP/Studio/CLI
+> are separate processes; Turso sync is row-LWW), so **any** fine-grained mutation API
+> invites silent cross-replica clobbers of disjoint edits. The compare-and-swap guard ships
+> **first**.
+
+### Locked design decisions
+
+- **Storage:** canonical data inside the single `contexts` row, never a sidecar. Phase 1 =
+  GFM-in-`body` spliced in place (JSON *ergonomics*, zero schema change); Phase 3 = promoted
+  datatable keeps canonical JSON in a fenced ```` ```bctx-table ```` block, rendered to GFM
+  on read so FTS/peek stay honest.
+- **Revision handle:** reuse `updatedAt` (already surfaced on every peek/get/search/resolve
+  — no new column). Content-hash fallback if timestamp granularity bites.
+- **Transclusion:** Obsidian-native `![[slug]]`. Prereq: `WIKILINK` regex
+  `/\[\[([^\]]+)\]\]/g` has no `!` guard, duplicated in `src/lib/wikilinks.ts:1` and
+  `src/wiki/export.ts:13` → add `(?<!!)` lookbehind + dedupe; route `![[..]]` into a
+  reserved `embeds` link channel mirroring `references` (kept out of `LINK_TYPES`).
+- **Export:** Phase 1 byte-stable (table already in `body`; one-time whitespace reflow on
+  first splice). Phase 3 object → own `<slug>.md`, canonical JSON in frontmatter (`data:`) +
+  rendered GFM body; pages keep `![[slug]]`. **Not** `src/export/managed.ts` (single global
+  BEGIN/END can't host N id-scoped fences).
+- **Flagship tools (exactly four, no query language in v1):** `wiki_table_get` /
+  `_set_cell` / `_add_row` / `_delete_row`, addressed by caption/heading + column-name +
+  row-key (not positional), echoing `headingAbove`+`header`; loud on ambiguous/out-of-range.
+
+### Roadmap (full arc committed; 0–3 = the datatable arc, 4–5 earned against usage)
+
+| Phase | Scope | Ships |
+|---|---|---|
+| **0 — Enabling primitives** | S | Revision-CAS + fence-aware GFM (de)serializer (`src/lib/mdtable.ts`). No user surface. |
+| **1 — FLAGSHIP: inline table ops** | M | `src/core/tables.ts` cell/row splice via existing write path; `wiki_table_*` MCP + CLI. Kills the one-cell-edit pain. Zero schema change, byte-stable export. |
+| **2 — Studio parity + parser unification** | M | Cell-blur endpoint → `core/tables.ts`; one shared table grammar (browser imports the pure lib). |
+| **3 — First-class datatables + transclusion** | L | **Body-canonical** datatable under a searchable `page_type` (body *is* the GFM table → reuses FTS/peek/history + Phase-1 table ops, no bespoke read path); `![[Title]]` embeds via reserved `embeds` channel, inlined on read; per-file export w/ verbatim embeds. *The literal "reused across pages" ask.* |
+| **4 — Typed properties + views** | L | Derive-on-write `page_properties` mirror of `metadata.props`; `wiki_query` predicate (eq/ne/lt/gt/lte/gte/in/contains/exists + numeric sort); `page_type='view'` saved queries rendered to a live GFM table. "Database OF pages". |
+| **5 — General sub-body mutation** | M | `wiki_get {section}` / `wiki_patch_section` on a fence-aware heading splice + CAS; `wiki_replace {find,replace,occurrence}` exact-match-or-refuse diff-write for the prose majority. |
+
+> **Shipped: Phases 0–5 (COMPLETE)** (200 tests green; typecheck + typecheck:studio + lint + build + real-binary e2e).
+> - **Phase 0** — content-hash `rev` on every `Context` (computed in `toContext`, never
+>   stored); `ifRev` compare-and-swap in `updateContext` (`RevConflictError`) threaded
+>   through `updatePage` + MCP (`wiki_update`/`update_context`) + CLI (`wiki update --if-rev`)
+>   + Studio PATCH (409 + `currentRev`); `wiki_get {ifChangedSince}` → `NOT_MODIFIED`
+>   sentinel; new pure `src/lib/mdtable.ts` (fence-aware GFM parse/serialize/splice,
+>   alignment + escaped-pipe fidelity). Tests: `test/{cas,mdtable}.test.ts`.
+> - **Phase 1** — `src/core/tables.ts` (`tableGet/tableSetCell/tableAddRow/tableDeleteRow`
+>   via `updatePage`, loud locator errors); MCP `wiki_table_*` (with `next[]` affordance
+>   envelope + `ifRev`); CLI `bctx wiki table get|set|add-row|rm-row`; skill-doc "editing
+>   tables" section. Tests: `test/tables.test.ts` + MCP round-trip in `test/mcpwiki.test.ts`.
+>   Verified on the real binary: one-cell edit is a minimal diff with alignment preserved,
+>   FTS still finds the changed cell, stale `--if-rev` rejected with the live rev.
+> - **Phase 2** — ONE shared table grammar: `studio/src/lib/markdown.ts` imports the pure
+>   `src/lib/mdtable.ts` via a `@core/*` alias (vite `resolve.alias` + dev `server.fs.allow`
+>   + tsconfig `paths`); build bundles the single source into both runtimes. The Studio
+>   editor's whole-body autosave is now **alignment-lossless** (renders `data-align` +
+>   re-emits via the shared `serializeTable`) — the old path silently dropped alignment.
+>   Plus `POST /api/wiki/pages/:id/table` cell endpoint + `wikiApi.editCell` (backs the
+>   Phase-3 grid; contenteditable keeps whole-body autosave to avoid a granular/full-body
+>   race). Tests: cell endpoint in `test/studio-api.test.ts`. Verified end-to-end in a real
+>   browser: edit a cell → autosave → stored markdown keeps the `:--- | :--: | ---:` row.
+> - **Phase 3** — datatables + transclusion, **body-canonical** (refined from the design's
+>   JSON-in-`metadata.data`): a `datatable` page's `body` *is* one canonical GFM table, so it
+>   reuses FTS/peek/history/export and the Phase-1 `wiki_table_*` cell/row ops verbatim — no
+>   bespoke read path, no schema change. `src/core/datatable.ts` (`createDatatable` +
+>   `expandTransclusions`); `![[Title]]` embeds via the reserved `embeds` channel
+>   (`EMBEDS_LINK`, kept out of `LINK_TYPES` like `references`) — `parseTransclusions` +
+>   `syncBodyLinks` mirror the references block; `parseWikiLinks`/export `WIKILINK` gained a
+>   `(?<!!)` lookbehind so `![[..]]` isn't captured/rewritten as a plain link/image.
+>   `wiki_get` full (MCP + CLI `--no-embed`) inlines embeds on read (peek stays
+>   reference-only); one datatable backs N pages, edit-once-reflect-everywhere. MCP
+>   `wiki_datatable_new` + CLI `bctx wiki datatable new --columns --row`. Export writes a
+>   datatable as its own `<slug>.md` (GFM body is canonical, `![[..]]` verbatim); import
+>   re-derives the embed (title-keyed `resolveWantedLinks` handles either page ordering).
+>   Tests: `test/{datatable,transclusion}.test.ts`. Verified on the real binary: edit a
+>   datatable once → two consumers both reflect it; export/import round-trips type + verbatim
+>   embed; wanted-embed resolves when the target is created after the consumer.
+> - **Phase 4** — typed properties + views. NEW `page_properties(context_id,key,value,type)`
+>   table (the only added stored state — ships as the first INCREMENTAL migration
+>   `0002_page_properties`, so existing stores upgrade in place; see the migration note below)
+>   is a DERIVED mirror of each page's `metadata.props`, rebuilt in the SAME write txn by
+>   `rebuildPageProperties` (folded into `createContext`/`updateContext`; cleaned up in
+>   `deleteContextChildren`) so it can never drift. `src/core/query.ts` = a predicate engine:
+>   `where` object (keys ANDed; scalar = eq, or `{eq,ne,lt,gt,lte,gte,contains,in,exists}`),
+>   numeric CAST comparisons, `sort {key,dir,numeric}`, compiled to correlated EXISTS/NOT-EXISTS
+>   SQL. `queryPages` + `listProperties` + saved views: `page_type='view'` whose
+>   `metadata.{query,columns}` render to a live GFM table (via `serializeTable`) on read/export
+>   — always reflects the current graph. Surfaces: MCP `wiki_query` / `wiki_list_properties` /
+>   `wiki_set_prop` / `wiki_view_new` + `props` on `wiki_new`/`wiki_update`; CLI `wiki query`
+>   / `list-properties` / `set-prop` / `view new` + `wiki new --prop k=v`. Export writes a
+>   `props:` frontmatter block (+ `query:`/`columns:` for views); import re-derives them.
+>   Tests: `test/{properties,query}.test.ts`. Verified on the real binary: query/sort, a view
+>   reflecting a `set-prop` live, export→import re-derives props + view in a fresh store.
+> - **Phase 4 Studio UI** (was deferred, now shipped) — `RightPanel` gained an editable
+>   **Fields** section: `metadata.props` render as key/value rows with inline edit / delete /
+>   `+ field` (type-coerced like the CLI), persisted via `wikiApi.update({setMetadata:{props}})`
+>   (merge preserves the other fields; the server re-derives the `page_properties` mirror).
+>   `view` pages render their LIVE table (studio route calls `renderView` in `GET /pages/:id`)
+>   and are read-only in the editor (like `source`), with a read-only query summary in the
+>   panel. Studio `PAGE_TYPES` gained `datatable`/`view` so both surface in the sidebar.
+>   Verified in a real browser: add/edit/delete a field end-to-end, view renders live, datatable
+>   displays.
+> - **Datatable grid editor + embedded-table rendering** (Studio) — a `datatable` page now opens
+>   in a dedicated **full-bleed grid** (`studio/src/editor/DataTableEditor.tsx`): edit cells, add/
+>   delete rows, add/delete/rename columns, cycle column alignment. Every mutation is one
+>   index-addressed splice op → `POST /pages/:id/table/op` → `core/tables` → `updatePage`
+>   (alignment-preserving, CAS via `ifRev`, no lossy whole-body PATCH); the grid is
+>   server-authoritative (reseeds from each op's response, serialized through one promise chain so
+>   rapid edits never race or self-409). NEW pure column mutators (`addColumnData`/`deleteColumnData`/
+>   `renameColumnData`/`setColumnAlignData` in `src/lib/mdtable.ts`) + index-addressed core ops
+>   (`tableSetCellAt`/`tableDeleteRowAt`/`tableAddColumn`/`tableDeleteColumn`/`tableRenameColumn`/
+>   `tableSetColumnAlign`) that refuse an immutable `source` page and out-of-range indices; a
+>   `writeTable` source guard now centralizes the immutable refusal for ALL table writes. Full
+>   surface parity: CLI `wiki table add-col/rm-col/rename-col` + MCP `wiki_table_add_column/
+>   _delete_column/_rename_column`. `WikiView` branches on `datatable` to render the grid and
+>   **auto-collapses the sidebar + right panel** (layout toggle restores them). Embeds: `![[Title]]`
+>   now renders inline in the prose editor as the referenced datatable's **read-only table + an
+>   "Open to edit ↗" header** (`markdownToHtml` emits a `contenteditable=false` placeholder that
+>   `WikiEditor` hydrates by fetching the datatable; `htmlToMarkdown` short-circuits on
+>   `data-embed-title` so the consuming page's stored body keeps the `![[Title]]` marker — the table
+>   is never inlined by autosave). Tests: column mutators + index ops (`test/{mdtable,tables}.test.ts`),
+>   the `/table/op` endpoint incl. CAS + source refusal (`test/studio-api.test.ts`). Verified in a
+>   real browser on a seeded store: full-bleed grid, cell edit + add-column persist via single
+>   `/table/op` POSTs, embed renders with Open-to-edit, and editing the consuming page's prose +
+>   autosave preserves `![[Title]]` (no inlined table) — the round-trip gate.
+> - **Migration to existing data** — the model moved from pure-greenfield to INCREMENTAL:
+>   schema additions ship as new `src/migrations/000N_*.ts` (editing an already-applied
+>   migration never reaches an existing store, since they're tracked by name). `page_properties`
+>   moved out of `0001_init` into `0002_page_properties` (registered in `migrate.ts`, `LATEST`
+>   bumped). Added `bctx wiki reindex` (rebuild the props mirror; `--links` re-derives the graph
+>   but SKIPS immutable `source` pages, per an adversarial-review finding). Tests:
+>   `test/{migration,reindex}.test.ts`. Applied to the real **edumetrics** store (472 contexts,
+>   26MB) on 2026-07-05: backed up → migrated to `0002` → reindexed → verified byte-identical
+>   row counts (zero data loss), FTS + reads intact. Backup: `edumetrics.db.bak-2026-07-05-pre-vnext`.
+> - **Table→datatable extraction** — NEW `extractTableToDatatable` (`src/core/tables.ts`) +
+>   CLI `bctx wiki datatable extract <ref> --title … [--caption|--table-index]`: lifts a GFM
+>   table out of a page into its own `datatable` page (verbatim: alignment / escaped pipes /
+>   in-cell `[[links]]`) and leaves a `![[Title]]` embed in its place, so the page reads
+>   identically (embed re-renders on read) while the data becomes queryable + reusable.
+>   Creates the datatable FIRST (source-update failure never loses the table); refuses an
+>   immutable `source` page or a title collision; ambiguous locator errors instead of guessing.
+>   Tests: `test/extract.test.ts`. Applied to real **edumetrics** on 2026-07-05 (backups
+>   `edumetrics.db.bak-2026-07-05-{pre,post}-extract`): extracted the 3 real data-tables →
+>   `roster-clientes-crm` (15×57), `precios-vocation-2026` (6×3), `indicadores-clave-edumetrics`
+>   (3×16). Verified: all 3 pages read BYTE-IDENTICAL after extraction+embed-expansion, 3
+>   `embeds` edges derived, datatables cell-addressable + FTS-searchable, contexts 472→475 /
+>   links 2734→2737 (only +3 embeds), integrity + FTS checks ok. Navigation-index tables (of
+>   `[[wikilinks]]`) and immutable sources deliberately left inline.
+> - **Phase 5** — general sub-body mutation for the prose/link majority a table/section can't
+>   reach. NEW pure `src/lib/section.ts` (fence-aware ATX heading addressing: `parseHeadings`,
+>   `findSections` — a section runs to the next same-or-higher heading — `replaceSection`, and
+>   `replaceOccurrence`). `src/core/edit.ts` wires them through `updatePage`, all
+>   EXACT-MATCH-OR-REFUSE via a typed `EditError`: `getPageSection`/`patchPageSection` refuse a
+>   missing OR ambiguous (>1) heading; `editPage` find/replace refuses a miss, and refuses a
+>   multi-match unless an `occurrence` (1-based) is given — never a silent no-op or wrong-place
+>   edit. Surfaces: MCP `wiki_get {section}` + `wiki_patch_section` + `wiki_replace`; CLI
+>   `wiki get --section` + `wiki patch-section` + `wiki replace` (find/replace named `replace`,
+>   not `edit`, since `wiki update` already aliases `edit`). All compose with `ifRev` CAS and
+>   re-sync `[[links]]` from the patched text. Tests: `test/{section,edit}.test.ts`. Verified
+>   on the real binary: patch one section (sibling intact), unique replace, absent-find /
+>   missing-heading / stale-rev all refuse with exit 1, links re-sync from a patched section.
+
+> Two cross-cutting mechanics from the completeness critic fold in: **revision-CAS**
+> (Phase 0) and **affordance-carrying result envelopes** (a `next:[{tool,args}]` block on
+> tool results handing the agent its next pre-addressed call — added to Phase 1+ responses
+> as each addressing rung lands).
+
+### Phase 0–1 build plan (execute-ready)
+
+- **0a — Revision CAS (first).** `UpdateInput` gains `ifRev?` (`contexts.ts:65`); in
+  `updateContext`, after the in-txn read of `existing` (`:245`), reject when
+  `ifRev !== existing.updated_at` with a typed `RevConflictError{currentRev}`. Thread through
+  `updatePage` (`wiki.ts:229`). Read side: `ifChangedSince` on `wiki_get`/`pagePeek` →
+  ~3-token `NOT_MODIFIED` sentinel. Surfaces: MCP/CLI (`--if-rev`)/Studio PATCH (409 + rev,
+  reuse existing 409 path). Test `test/cas.test.ts`.
+- **0b — `src/lib/mdtable.ts`** (NEW, pure, no deps/DOM): `parseTables(body)` →
+  `{headingAbove, header, alignments, rows, startLine, endLine}[]`, **fence-aware** (consume
+  ```` ``` ```` before detecting tables, per `studio markdown.ts:145`), honoring escaped
+  `\|`, optional outer pipes, ragged rows; `serializeTable` preserving alignment. Test
+  `test/mdtable.test.ts` (incl. code-fence tables NOT matched).
+- **1 — `src/core/tables.ts`** (NEW): `tableGet/tableSetCell/tableAddRow/tableDeleteRow` —
+  `resolvePageRef`→`getPage`→parse→splice→**`updatePage`** (history/FTS/`syncBodyLinks` fire
+  free; anti-drift held). Locate by caption/`headingAbove` then index; row by key-column
+  else ordinal; column by header; loud typed errors. `tableGet` returns array-of-arrays +
+  header + alignment + `rev`, no page body. Register `wiki_table_*` in
+  `src/mcp/wiki-tools.ts` (coaching descriptions); CLI `bctx wiki table …` in
+  `src/commands/wiki.ts`; add a "when to use a datatable vs plain markdown table" note to
+  `skills/braincontext-wiki/SKILL.md`. Test `test/tables.test.ts`.
+
+### Risks → mitigations
+
+- Silent cross-replica clobber (row-LWW) → **Phase-0 CAS ships before any granular write**.
+- Storage/history amplification unchanged → document as agent-token + corruption-safety
+  win, not a storage win; opt-in diff-history only if bloat bites.
+- Fenced-code false positives / two-parser drift → `mdtable.ts` fence-aware + hard tests;
+  Phase 2 makes Studio import the same lib.
+- `![[..]]` token collision → Phase 3 `(?<!!)` lookbehind (both copies, deduped) + `embeds`.
+- Query-engine scope creep → v1 = get + 3 mutators, no query language; querying/typed
+  properties only Phases 3–4 behind one shared AST.
+
+### Open decisions
+
+1. **Row-granular sidecar storage** — the one thing JSON-in-row can't give (two agents on
+   *different rows* of one big table never clobber). Default **no** (Phase-0 CAS covers
+   safety; token win identical); revisit at Phase 3 only against a real
+   many-agents-on-shared-large-tables profile.
+2. **Commitment past Phase 3** — Phases 4–5 endorsed but earned against usage; confirm at
+   the Phase 3 boundary.

@@ -82,6 +82,10 @@ export function pageTypeGlyph(pageType: string | null): string {
       return '⇄' // ⇄
     case 'analysis':
       return '◉' // ◉
+    case 'datatable':
+      return '▦' // ▦ (grid)
+    case 'view':
+      return '⊞' // ⊞ (saved query)
     case 'source':
       return '▤' // ▤
     case 'index':

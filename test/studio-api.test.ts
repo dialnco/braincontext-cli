@@ -4,6 +4,7 @@ import { join } from 'node:path'
 import type { Hono } from 'hono'
 import { describe, expect, it } from 'vitest'
 import type { Context } from '../src/core/contexts'
+import { recordSource } from '../src/core/wiki'
 import { buildStudioApp } from '../src/studio/server'
 import { staticProvider } from '../src/studio/stores'
 import { freshDb } from './_db'
@@ -181,6 +182,99 @@ describe('studio wiki API', () => {
     expect(pages.length).toBe(2)
   })
 
+  it('edits one table cell in place (POST /pages/:id/table)', async () => {
+    const app = await newApp()
+    const p = (await (
+      await app.request(
+        '/api/wiki/pages',
+        json({
+          title: 'Providers',
+          pageType: 'concept',
+          body: '| Name | Status |\n| --- | --- |\n| Acme | old |',
+        }),
+      )
+    ).json()) as Context
+
+    const res = await app.request(
+      `/api/wiki/pages/${p.id}/table`,
+      json({ row: 'Acme', column: 'Status', value: 'active' }),
+    )
+    expect(res.status).toBe(200)
+    const updated = (await res.json()) as Context
+    expect(updated.body).toContain('| Acme | active |')
+    expect(updated.body).not.toContain('| Acme | old |')
+
+    // stale ifRev → 409 carrying the live rev
+    const conflict = await app.request(
+      `/api/wiki/pages/${p.id}/table`,
+      json({ row: 'Acme', column: 'Status', value: 'x', ifRev: p.rev }),
+    )
+    expect(conflict.status).toBe(409)
+    expect(((await conflict.json()) as { currentRev: string }).currentRev).toBe(updated.rev)
+
+    // unknown column → 400 (loud, not a silent wrong-place edit)
+    const bad = await app.request(
+      `/api/wiki/pages/${p.id}/table`,
+      json({ row: 'Acme', column: 'Nope', value: 'x' }),
+    )
+    expect(bad.status).toBe(400)
+  })
+
+  it('runs index-addressed structural ops (POST /pages/:id/table/op)', async () => {
+    const app = await newApp()
+    const mk = async (body: string) =>
+      (await (
+        await app.request('/api/wiki/pages', json({ title: 'Grid', pageType: 'datatable', body }))
+      ).json()) as Context
+    const op = (id: string, body: unknown) =>
+      app.request(`/api/wiki/pages/${id}/table/op`, json(body))
+
+    const p = await mk('| Name | Status |\n| :--- | --- |\n| Acme | old |\n| Beta | old |')
+
+    // setCell by index.
+    let res = await op(p.id, { op: 'setCell', row: 0, col: 1, value: 'active' })
+    expect(res.status).toBe(200)
+    let cur = (await res.json()) as Context
+    expect(cur.body).toContain('| Acme | active |')
+
+    // addColumn (append) → every row padded.
+    res = await op(p.id, { op: 'addColumn', name: 'Owner', align: 'center' })
+    cur = (await res.json()) as Context
+    expect(cur.body).toContain('| Name | Status | Owner |')
+    expect(cur.body).toContain('| :--- | --- | :--: |')
+
+    // renameColumn + deleteRow + deleteColumn all succeed.
+    expect((await op(p.id, { op: 'renameColumn', col: 2, name: 'Team' })).status).toBe(200)
+    expect((await op(p.id, { op: 'deleteRow', row: 1 })).status).toBe(200)
+    res = await op(p.id, { op: 'deleteColumn', col: 2 })
+    cur = (await res.json()) as Context
+    expect(cur.body).not.toContain('Team')
+    expect(cur.body).toContain('| Acme | active |')
+
+    // out-of-range index → 400.
+    expect((await op(p.id, { op: 'setCell', row: 9, col: 0, value: 'x' })).status).toBe(400)
+
+    // stale ifRev → 409 with the live rev.
+    const conflict = await op(p.id, { op: 'addRow', cells: ['Z', 'z'], ifRev: p.rev })
+    expect(conflict.status).toBe(409)
+    expect(((await conflict.json()) as { currentRev: string }).currentRev).toBe(cur.rev)
+  })
+
+  it('refuses structural ops on an immutable source page (400)', async () => {
+    // Ingest a source page directly (sources aren't authored via POST /pages).
+    const db = await freshDb()
+    const app = buildStudioApp(staticProvider(db), { staticDir: fakeStudioDir() })
+    const src = await recordSource(db, {
+      title: 'Src',
+      body: '| a | b |\n| --- | --- |\n| 1 | 2 |',
+    })
+    const res = await app.request(
+      `/api/wiki/pages/${src.id}/table/op`,
+      json({ op: 'setCell', row: 0, col: 0, value: 'x' }),
+    )
+    expect(res.status).toBe(400)
+  })
+
   it('updates a page body and re-syncs wikilinks', async () => {
     const app = await newApp()
     const p = (await (
@@ -196,6 +290,41 @@ describe('studio wiki API', () => {
       wanted: boolean
     }>
     expect(links.some((l) => l.title === 'Child' && l.wanted)).toBe(true)
+  })
+
+  it('restores a past body via PATCH (ifRev CAS + agentSource label) and rejects a stale rev', async () => {
+    const app = await newApp()
+    const p = (await (
+      await app.request('/api/wiki/pages', json({ title: 'Doc', pageType: 'concept', body: 'v1' }))
+    ).json()) as Context
+    const patch = (input: unknown) =>
+      app.request(`/api/wiki/pages/${p.id}`, { ...json(input), method: 'PATCH' })
+
+    // Edit the body — the content-hash rev advances.
+    const v2 = (await (await patch({ body: 'v2', ifRev: p.rev })).json()) as Context
+    expect(v2.body).toBe('v2')
+    expect(v2.rev).not.toBe(p.rev)
+
+    // A stale ifRev (the original create rev) → 409 carrying the live rev.
+    const stale = await patch({ body: 'boom', ifRev: p.rev })
+    expect(stale.status).toBe(409)
+    expect(((await stale.json()) as { currentRev: string }).currentRev).toBe(v2.rev)
+
+    // Restore v1's body with the fresh rev + agentSource:'restore' → succeeds and is labeled.
+    const restored = await patch({ body: 'v1', ifRev: v2.rev, agentSource: 'restore' })
+    expect(restored.status).toBe(200)
+    expect(((await restored.json()) as Context).body).toBe('v1')
+
+    // History (newest first) records create → update(v2) → restore; the newest row is labeled.
+    const history = (await (await app.request(`/api/wiki/pages/${p.id}/history`)).json()) as Array<{
+      event: string
+      agentSource: string | null
+      newBody: string | null
+    }>
+    expect(history.length).toBe(3)
+    expect(history[0]?.agentSource).toBe('restore')
+    expect(history[0]?.newBody).toBe('v1')
+    expect(history.some((h) => h.event === 'create')).toBe(true)
   })
 })
 

@@ -10,13 +10,14 @@ export type Kind = (typeof KINDS)[number]
 export const SCOPES = ['global', 'user', 'project', 'local'] as const
 export type Scope = (typeof SCOPES)[number]
 
-/** Page types a user may author in Studio (excludes derived `index` + immutable `source`). */
+/** Page types a user may author in Studio (excludes derived `index`/`view` + immutable `source`). */
 export const AUTHORED_PAGE_TYPES = [
   'entity',
   'concept',
   'summary',
   'comparison',
   'analysis',
+  'datatable',
 ] as const
 export type AuthoredPageType = (typeof AUTHORED_PAGE_TYPES)[number]
 
@@ -27,6 +28,8 @@ export const PAGE_TYPES = [
   'summary',
   'comparison',
   'analysis',
+  'datatable',
+  'view',
   'source',
   'index',
 ] as const
@@ -52,6 +55,8 @@ export interface Context {
   createdAt: string
   updatedAt: string
   deletedAt: string | null
+  /** Content-hash revision (server-computed); thread back as `ifRev` for optimistic concurrency. */
+  rev?: string
 }
 
 /** An outbound/inbound typed edge as returned by the links/backlinks endpoints. */

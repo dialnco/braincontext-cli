@@ -4,6 +4,7 @@ import { Hov, sx } from '../../lib/dc'
 import { pageFreshness } from '../../lib/freshness'
 import { relTime } from '../../lib/time'
 import { estimateTokens, formatTokens } from '../../lib/tokens'
+import { ConfirmDialog } from '../common/ConfirmDialog'
 
 interface Props {
   page: Context
@@ -19,6 +20,35 @@ interface Props {
   onTagClick: (tag: string) => void
   onAddTag: (tag: string) => void
   onRemoveTag: (tag: string) => void
+  /** Set (or delete, with null) one typed property; null value removes the key. */
+  onSetProp: (key: string, value: string | number | boolean | null) => void
+  /** Restore the page body to a past revision (that revision's post-edit state). */
+  onRestoreRevision?: (entry: HistoryEntry) => void
+}
+
+/** A scalar value stored in metadata.props, coerced from a text input. */
+type PropScalar = string | number | boolean
+
+/** Read metadata.props as display-ready [key, value] pairs (scalars only, sorted). */
+function readPageProps(metadata: Record<string, unknown>): [string, PropScalar][] {
+  const raw = metadata.props
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return []
+  const out: [string, PropScalar][] = []
+  for (const [k, v] of Object.entries(raw as Record<string, unknown>)) {
+    if (typeof v === 'string' || typeof v === 'boolean') out.push([k, v])
+    else if (typeof v === 'number' && Number.isFinite(v)) out.push([k, v])
+  }
+  return out.sort((a, b) => a[0].localeCompare(b[0]))
+}
+
+/** Coerce a text value to a typed scalar (number / boolean / string) — mirrors the CLI. */
+function coerceProp(value: string): PropScalar {
+  if (/^-?\d+(\.\d+)?$/.test(value)) {
+    const n = Number(value)
+    if (Number.isFinite(n)) return n
+  }
+  if (value === 'true' || value === 'false') return value === 'true'
+  return value
 }
 
 const DIVIDER = 'height:1px;background:var(--border);margin:18px 0;'
@@ -55,9 +85,16 @@ export function RightPanel({
   onTagClick,
   onAddTag,
   onRemoveTag,
+  onSetProp,
+  onRestoreRevision,
 }: Props) {
   const [tab, setTab] = useState<'linked' | 'unlinked' | 'history'>('linked')
+  const [pendingRestore, setPendingRestore] = useState<HistoryEntry | null>(null)
   const fresh = pageFreshness(page)
+  const props = useMemo(() => readPageProps(page.metadata), [page.metadata])
+  // Fields are editable on authored pages; source is immutable and view/index are generated.
+  const fieldsEditable =
+    page.pageType !== 'source' && page.pageType !== 'index' && page.pageType !== 'view'
 
   const outline = useMemo(() => {
     const out: string[] = []
@@ -120,6 +157,46 @@ export function RightPanel({
         ))}
         <TagAdd key="__add" existing={page.tags} onAdd={onAddTag} />
       </div>
+
+      {(props.length > 0 || fieldsEditable || page.pageType === 'view') && (
+        <>
+          <div style={sx(DIVIDER)} />
+          <div
+            style={sx(
+              'display:flex;align-items:center;justify-content:space-between;margin-bottom:11px;',
+            )}
+          >
+            <span style={sx(HEADING)}>Fields</span>
+            <span style={sx("font:400 10px 'IBM Plex Mono';color:var(--muted);")}>queryable</span>
+          </div>
+          {page.pageType === 'view' ? (
+            <ViewQuery metadata={page.metadata} />
+          ) : (
+            <div style={sx('display:flex;flex-direction:column;gap:8px;')}>
+              {props.map(([k, v]) => (
+                <PropRow
+                  key={k}
+                  name={k}
+                  value={v}
+                  editable={fieldsEditable}
+                  onSet={(val) => onSetProp(k, val)}
+                  onRemove={() => onSetProp(k, null)}
+                />
+              ))}
+              {props.length === 0 && (
+                <div
+                  style={sx(
+                    "font:400 12px/1.5 'Spectral',serif;color:var(--muted);font-style:italic;",
+                  )}
+                >
+                  No fields yet — add typed properties to filter this page in queries and views.
+                </div>
+              )}
+              {fieldsEditable && <PropAdd existing={props.map(([k]) => k)} onAdd={onSetProp} />}
+            </div>
+          )}
+        </>
+      )}
 
       {outline.length > 0 && (
         <>
@@ -250,7 +327,7 @@ export function RightPanel({
         (history.length === 0 ? (
           <Empty text="No recorded changes yet." />
         ) : (
-          history.map((h) => (
+          history.map((h, idx) => (
             <div
               key={h.id}
               style={sx(
@@ -282,6 +359,19 @@ export function RightPanel({
               >
                 {relTime(h.changedAt)}
               </span>
+              {onRestoreRevision && idx > 0 && h.newBody != null && (
+                <Hov
+                  as="button"
+                  base={sx(
+                    "flex:0 0 auto;font:500 10px 'IBM Plex Mono';color:var(--accent-ink);background:transparent;border:1px solid var(--border);border-radius:6px;padding:2px 7px;cursor:pointer;",
+                  )}
+                  hover={sx('background:var(--accent-soft);border-color:var(--accent);')}
+                  title="Restore this version"
+                  onClick={() => setPendingRestore(h)}
+                >
+                  ↩ Restore
+                </Hov>
+              )}
             </div>
           ))
         ))}
@@ -378,6 +468,23 @@ export function RightPanel({
           ))}
         </svg>
       </div>
+
+      {pendingRestore && (
+        <ConfirmDialog
+          heading="Restore version"
+          message={`Restore this page to its ${pendingRestore.event} from ${relTime(
+            pendingRestore.changedAt,
+          )}? The current version is kept in history, so you can undo this.`}
+          confirmLabel="Restore"
+          destructive={false}
+          onConfirm={() => {
+            const entry = pendingRestore
+            setPendingRestore(null)
+            onRestoreRevision?.(entry)
+          }}
+          onCancel={() => setPendingRestore(null)}
+        />
+      )}
     </div>
   )
 }
@@ -397,6 +504,177 @@ function Prop({ label, value, mono }: { label: string; value: string; mono?: boo
       >
         {value}
       </span>
+    </div>
+  )
+}
+
+/** One editable typed property: mono key + inline-editable value + delete. */
+function PropRow({
+  name,
+  value,
+  editable,
+  onSet,
+  onRemove,
+}: {
+  name: string
+  value: PropScalar
+  editable: boolean
+  onSet: (value: PropScalar) => void
+  onRemove: () => void
+}) {
+  const [editing, setEditing] = useState(false)
+  const [val, setVal] = useState(String(value))
+
+  const commit = () => {
+    const next = val.trim()
+    setEditing(false)
+    if (next && next !== String(value)) onSet(coerceProp(next))
+    else setVal(String(value))
+  }
+
+  return (
+    <div style={sx('display:flex;align-items:center;gap:10px;')}>
+      <span
+        style={sx(
+          "width:72px;flex:0 0 72px;overflow:hidden;text-overflow:ellipsis;font:400 12px 'IBM Plex Mono';color:var(--muted);",
+        )}
+        title={name}
+      >
+        {name}
+      </span>
+      {editing ? (
+        <input
+          autoFocus
+          value={val}
+          onChange={(e) => setVal(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter') {
+              e.preventDefault()
+              commit()
+            } else if (e.key === 'Escape') {
+              setVal(String(value))
+              setEditing(false)
+            }
+          }}
+          onBlur={commit}
+          style={sx(
+            "flex:1;min-width:0;border:1px solid var(--accent);background:transparent;outline:none;border-radius:6px;padding:2px 7px;font:400 12px 'IBM Plex Mono';color:var(--accent-ink);",
+          )}
+        />
+      ) : (
+        <Hov
+          base={sx(
+            `flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;font:400 13px 'IBM Plex Mono';color:var(--ink-soft);border-radius:6px;padding:1px 5px;${editable ? 'cursor:text;' : ''}`,
+          )}
+          hover={sx(editable ? 'background:var(--accent-soft);' : '')}
+          onClick={() => editable && setEditing(true)}
+          title={editable ? 'Click to edit' : undefined}
+        >
+          {String(value)}
+        </Hov>
+      )}
+      {editable && !editing && (
+        <Hov
+          as="span"
+          base={sx('display:inline-flex;opacity:.4;cursor:pointer;flex:0 0 auto;')}
+          hover={sx('opacity:1;color:#b4533f;')}
+          onClick={onRemove}
+          title="Remove field"
+        >
+          ✕
+        </Hov>
+      )}
+    </div>
+  )
+}
+
+/** The `+ field` control: opens a `key=value` input that sets a new typed property. */
+function PropAdd({
+  existing,
+  onAdd,
+}: {
+  existing: string[]
+  onAdd: (key: string, value: PropScalar) => void
+}) {
+  const [open, setOpen] = useState(false)
+  const [val, setVal] = useState('')
+
+  const commit = () => {
+    const eq = val.indexOf('=')
+    if (eq > 0) {
+      const key = val.slice(0, eq).trim()
+      const value = val.slice(eq + 1).trim()
+      if (key && value && !existing.includes(key)) onAdd(key, coerceProp(value))
+    }
+    setVal('')
+    setOpen(false)
+  }
+
+  if (!open) {
+    return (
+      <Hov
+        as="span"
+        base={sx(
+          "align-self:flex-start;font:500 11px 'IBM Plex Mono';color:var(--accent-ink);border:1px solid var(--accent);border-radius:6px;padding:2px 8px;cursor:pointer;margin-top:2px;",
+        )}
+        hover={sx('background:var(--accent-soft);')}
+        onClick={() => setOpen(true)}
+        title="Add a typed field (key=value)"
+      >
+        + field
+      </Hov>
+    )
+  }
+
+  return (
+    <input
+      autoFocus
+      value={val}
+      onChange={(e) => setVal(e.target.value)}
+      onKeyDown={(e) => {
+        if (e.key === 'Enter') {
+          e.preventDefault()
+          commit()
+        } else if (e.key === 'Escape') {
+          setVal('')
+          setOpen(false)
+        }
+      }}
+      onBlur={commit}
+      placeholder="status=active"
+      style={sx(
+        "border:1px solid var(--accent);background:transparent;outline:none;border-radius:6px;padding:3px 8px;font:400 12px 'IBM Plex Mono';color:var(--accent-ink);",
+      )}
+    />
+  )
+}
+
+/** Read-only summary of a saved view's query + projected columns. */
+function ViewQuery({ metadata }: { metadata: Record<string, unknown> }) {
+  const where =
+    metadata.query && typeof metadata.query === 'object'
+      ? (metadata.query as { where?: unknown }).where
+      : undefined
+  const columns = Array.isArray(metadata.columns)
+    ? (metadata.columns as unknown[]).filter((x): x is string => typeof x === 'string')
+    : []
+  return (
+    <div style={sx('display:flex;flex-direction:column;gap:8px;')}>
+      <div
+        style={sx(
+          "font:400 12px/1.5 'IBM Plex Mono';color:var(--ink-soft);background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:8px 10px;overflow-wrap:anywhere;",
+        )}
+      >
+        {where ? JSON.stringify(where) : 'all pages'}
+      </div>
+      {columns.length > 0 && (
+        <div style={sx("font:400 11px 'IBM Plex Mono';color:var(--muted);")}>
+          columns: {columns.join(', ')}
+        </div>
+      )}
+      <div style={sx("font:400 11.5px/1.5 'Spectral',serif;color:var(--muted);font-style:italic;")}>
+        This view renders live from its query. Edit the query with the CLI/MCP.
+      </div>
     </div>
   )
 }

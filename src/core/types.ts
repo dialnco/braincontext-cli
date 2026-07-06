@@ -18,18 +18,24 @@ export const PAGE_TYPES = [
   'summary',
   'comparison',
   'analysis',
+  'datatable',
+  'view',
   'source',
   'index',
 ] as const
 export type PageType = (typeof PAGE_TYPES)[number]
 
-/** Page types an agent may create directly (excludes the derived `index`). */
+/**
+ * Page types an agent may author directly with a free-form body (excludes the DERIVED
+ * types whose body is generated: `index`, `view`, and `source` which is ingest-only).
+ */
 export const AUTHORED_PAGE_TYPES = [
   'entity',
   'concept',
   'summary',
   'comparison',
   'analysis',
+  'datatable',
 ] as const
 
 /**
@@ -50,6 +56,13 @@ export type LinkType = (typeof LINK_TYPES)[number]
 
 /** The reserved auto-derived link channel (managed by syncBodyLinks). */
 export const REFERENCES_LINK = 'references'
+
+/**
+ * The reserved auto-derived transclusion channel: `![[Title]]` in a body embeds that page
+ * (typically a datatable) into this one. Managed by syncBodyLinks exactly like
+ * `references`, and — like it — kept out of LINK_TYPES so explicit links never collide.
+ */
+export const EMBEDS_LINK = 'embeds'
 
 export interface ContextsTable {
   id: string
@@ -129,6 +142,20 @@ export interface WikiLogTable {
   created_at: string
 }
 
+/**
+ * Derived scalar-property mirror of a page's `metadata.props`, rebuilt on every write
+ * (see rebuildPageProperties). One row per (page, key); `value` is the canonical string
+ * form and `type` tells the query compiler whether to compare it as text or a number.
+ * Fully derived — never the source of truth, so it can be dropped and rebuilt freely.
+ */
+export interface PagePropertiesTable {
+  context_id: string
+  key: string
+  value: string | null
+  /** 'string' | 'number' | 'boolean' — how the query layer compares `value`. */
+  type: string
+}
+
 export interface Database {
   contexts: ContextsTable
   tags: TagsTable
@@ -138,4 +165,5 @@ export interface Database {
   contexts_fts: ContextsFtsTable
   links: LinksTable
   wiki_log: WikiLogTable
+  page_properties: PagePropertiesTable
 }

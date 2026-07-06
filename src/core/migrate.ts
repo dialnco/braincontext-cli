@@ -1,11 +1,14 @@
 import { type Kysely, sql } from 'kysely'
 import { Migrator } from 'kysely/migration'
 import { migration as init0001 } from '../migrations/0001_init'
+import { migration as pageProps0002 } from '../migrations/0002_page_properties'
 import { withFileLock } from './lock'
 import type { Database } from './types'
 
-const MIGRATIONS = { '0001_init': init0001 } as const
-const LATEST = '0001_init'
+// Ordered by key: the Migrator applies any not-yet-recorded migration in name order, so an
+// existing store at 0001 gets only 0002, and a fresh store gets 0001 then 0002.
+const MIGRATIONS = { '0001_init': init0001, '0002_page_properties': pageProps0002 } as const
+const LATEST = '0002_page_properties'
 
 /** True if the latest migration is already recorded (fast path: no lock, no migrator). */
 async function isCurrent(db: Kysely<Database>): Promise<boolean> {

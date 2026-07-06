@@ -111,4 +111,53 @@ describe('mcp wiki tools', () => {
 
     await db.destroy()
   })
+
+  it('wiki_table_* tools read and edit a table cell in place', async () => {
+    const db = await freshDb()
+    const client = await connect(db)
+
+    const names = (await client.listTools()).tools.map((t) => t.name)
+    for (const n of [
+      'wiki_table_get',
+      'wiki_table_set_cell',
+      'wiki_table_add_row',
+      'wiki_table_delete_row',
+    ]) {
+      expect(names).toContain(n)
+    }
+
+    await client.callTool({
+      name: 'wiki_new',
+      arguments: {
+        title: 'Providers',
+        type: 'concept',
+        body: '| Name | Status |\n| --- | --- |\n| Acme | active |\n| Beta | old |',
+      },
+    })
+
+    const view = payload(
+      await client.callTool({ name: 'wiki_table_get', arguments: { ref: 'Providers' } }),
+    )
+    expect(view.header).toEqual(['Name', 'Status'])
+    expect(view.next[0].tool).toBe('wiki_table_set_cell') // affordance envelope
+
+    const updated = payload(
+      await client.callTool({
+        name: 'wiki_table_set_cell',
+        arguments: { ref: 'Providers', row: 'Beta', column: 'Status', value: 'active' },
+      }),
+    )
+    expect(updated.body).toContain('| Beta | active |')
+    expect(updated.body).not.toContain('| Beta | old |')
+
+    // stale ifRev is rejected with a rev_conflict envelope
+    const conflict = (await client.callTool({
+      name: 'wiki_table_set_cell',
+      arguments: { ref: 'Providers', row: 'Acme', column: 'Status', value: 'x', ifRev: view.rev },
+    })) as { isError?: boolean; content: Array<{ text: string }> }
+    expect(conflict.isError).toBe(true)
+    expect(conflict.content[0]?.text ?? '').toContain('rev_conflict')
+
+    await db.destroy()
+  })
 })

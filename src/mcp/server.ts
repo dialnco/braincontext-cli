@@ -6,6 +6,7 @@ import {
   deleteContext,
   getContext,
   listContexts,
+  RevConflictError,
   searchContexts,
   updateContext,
 } from '../core/contexts'
@@ -136,21 +137,33 @@ export function buildServer(db: Kysely<Database>): McpServer {
         addTags: z.array(z.string()).optional(),
         removeTags: z.array(z.string()).optional(),
         setMetadata: z.record(z.string(), z.unknown()).optional(),
+        ifRev: z
+          .string()
+          .optional()
+          .describe('rev from your last read; the edit is rejected if the entry changed since'),
         agent: z.string().optional(),
       },
     },
-    async ({ id, title, body, addTags, removeTags, setMetadata, agent }) => {
+    async ({ id, title, body, addTags, removeTags, setMetadata, ifRev, agent }) => {
       const existing = await getContext(db, id)
       if (!existing || existing.pageType !== null) return fail(`No context with id ${id}`)
-      const ctx = await updateContext(db, id, {
-        title,
-        body,
-        addTags,
-        removeTags,
-        setMetadata,
-        agentSource: agent,
-      })
-      return ctx ? ok(ctx) : fail(`No context with id ${id}`)
+      try {
+        const ctx = await updateContext(db, id, {
+          title,
+          body,
+          addTags,
+          removeTags,
+          setMetadata,
+          ifRev,
+          agentSource: agent,
+        })
+        return ctx ? ok(ctx) : fail(`No context with id ${id}`)
+      } catch (e) {
+        if (e instanceof RevConflictError) {
+          return fail(JSON.stringify({ error: 'rev_conflict', currentRev: e.currentRev }, null, 2))
+        }
+        throw e
+      }
     },
   )
 
