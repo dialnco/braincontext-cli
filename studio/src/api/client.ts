@@ -50,9 +50,26 @@ export function qs(params: Record<string, string | number | undefined>): string 
   return pairs.length ? `?${pairs.join('&')}` : ''
 }
 
+/** Multipart POST (uploads). No content-type header — the browser sets the boundary. */
+async function upload<T>(path: string, form: FormData): Promise<T> {
+  const res = await fetch(`/api${path}`, { method: 'POST', body: form })
+  const text = await res.text()
+  const data = text ? safeJson(text) : undefined
+  if (!res.ok) {
+    let message = `POST ${path} failed (${res.status})`
+    if (data && typeof data === 'object' && 'error' in data) {
+      message = String((data as { error: unknown }).error)
+    }
+    throw new ApiError(res.status, message, data)
+  }
+  return data as T
+}
+
 export const api = {
   get: <T>(path: string) => request<T>('GET', path),
   post: <T>(path: string, body?: unknown) => request<T>('POST', path, body),
+  put: <T>(path: string, body?: unknown) => request<T>('PUT', path, body),
   patch: <T>(path: string, body?: unknown) => request<T>('PATCH', path, body),
   del: <T>(path: string, body?: unknown) => request<T>('DELETE', path, body),
+  upload,
 }

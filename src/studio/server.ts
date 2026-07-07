@@ -2,8 +2,10 @@ import { existsSync } from 'node:fs'
 import { readFile } from 'node:fs/promises'
 import { extname, join, normalize, sep } from 'node:path'
 import { Hono, type MiddlewareHandler } from 'hono'
+import type { StoreFactory } from '../core/storage/s3'
 import { contextsRoutes } from './routes/contexts'
 import { exportRoutes } from './routes/export'
+import { filesRoutes } from './routes/files'
 import { healthRoutes } from './routes/health'
 import { projectsRoutes } from './routes/projects'
 import { tagsRoutes } from './routes/tags'
@@ -27,6 +29,8 @@ const MIME: Record<string, string> = {
 export interface StudioAppOpts {
   /** Absolute path to the built SPA (dist/studio). Injected so tests can fake it. */
   staticDir: string
+  /** Object-store factory override so tests can fake S3/R2 (defaults to the real client). */
+  filesStoreFactory?: StoreFactory
 }
 
 // Loopback host names. The server binds 127.0.0.1, but that alone does not stop a
@@ -113,6 +117,7 @@ export function buildStudioApp(provider: StoreProvider, opts: StudioAppOpts): Ho
   app.route('/api/wiki', wikiRoutes(provider))
   app.route('/api/tags', tagsRoutes(provider))
   app.route('/api/export', exportRoutes(provider))
+  app.route('/api/files', filesRoutes(provider, opts.filesStoreFactory))
   // Keep the API namespace honest: an unknown /api/* is a JSON 404, never the SPA shell.
   app.all('/api/*', (c) => c.json({ error: 'not found' }, 404))
 

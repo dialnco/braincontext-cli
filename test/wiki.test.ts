@@ -32,6 +32,21 @@ describe('wiki pages & links', () => {
     await db.destroy()
   })
 
+  it('never turns file refs into wanted links (file embeds are not pages)', async () => {
+    const db = await freshDb()
+    const id = '01ARZ3NDEKTSV4RRFFQ69G5FAV'
+    const page = await createPage(db, {
+      title: 'With attachment',
+      pageType: 'concept',
+      body: `![[file:${id}|report.pdf]]\n\nSee [[file:${id}|report.pdf]] and [[Gateway]].`,
+    })
+    const links = await outboundLinks(db, page.id)
+    expect(links.some((l) => (l.title ?? '').toLowerCase().startsWith('file:'))).toBe(false)
+    expect(links.filter((l) => l.type === 'references').map((l) => l.title)).toEqual(['Gateway'])
+    expect(links.filter((l) => l.type === 'embeds')).toEqual([])
+    await db.destroy()
+  })
+
   it('suffixes slugs on collision', async () => {
     const db = await freshDb()
     const a = await createPage(db, { title: 'Cache', pageType: 'concept', body: '' })

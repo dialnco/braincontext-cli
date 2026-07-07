@@ -1,5 +1,6 @@
 import type React from 'react'
 import { useCallback, useEffect, useRef, useState } from 'react'
+import { type FileMeta, fileContentUrl, filesApi } from '../api/files'
 import type { Context } from '../api/types'
 import { wikiApi } from '../api/wiki'
 import { ConfirmDialog } from '../components/common/ConfirmDialog'
@@ -19,10 +20,11 @@ import {
   transformBlock,
 } from '../lib/blocks'
 import { sx } from '../lib/dc'
-import { htmlToMarkdown, markdownToHtml } from '../lib/markdown'
+import { fileEmbedHtml, fileImgHtml, htmlToMarkdown, markdownToHtml } from '../lib/markdown'
 import { S } from '../lib/theme'
 import { estimateTokens, formatTokens } from '../lib/tokens'
 import { wlSpan } from '../lib/wikilinks'
+import { useApp } from '../state/StoreContext'
 import { type SaveStatus, useAutosave } from '../state/useAutosave'
 
 interface Fmt {
@@ -143,6 +145,54 @@ function renderEmbedOpen(
   }
 }
 
+function humanSize(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
+}
+
+/**
+ * Fill a `![[file:<id>|name]]` placeholder with an attachment card: filename + size,
+ * a Download link, and — for PDFs — an inline viewer. The iframe/link URLs hit the
+ * same-origin /api/files content endpoint, which 302s to a presigned bucket URL.
+ */
+function renderFileEmbed(node: HTMLElement, meta: FileMeta, onRemove?: () => void): void {
+  node.innerHTML = ''
+  const head = document.createElement('div')
+  head.setAttribute(
+    'style',
+    'display:flex;align-items:center;gap:8px;padding:9px 14px;background:var(--code-bg);',
+  )
+  const label = document.createElement('span')
+  label.setAttribute(
+    'style',
+    "flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font:600 12px/1 'IBM Plex Mono',monospace;color:var(--muted);",
+  )
+  label.textContent = `📎 ${meta.filename} · ${humanSize(meta.size)}`
+  label.title = meta.mime
+  const dl = document.createElement('a')
+  dl.href = fileContentUrl(meta.id, true)
+  dl.setAttribute('contenteditable', 'false')
+  dl.setAttribute(
+    'style',
+    "cursor:pointer;font:600 11px 'IBM Plex Mono',monospace;color:var(--accent-ink);background:transparent;border:1px solid var(--border);border-radius:7px;padding:3px 10px;text-decoration:none;",
+  )
+  dl.textContent = 'Download ↓'
+  head.append(label, dl)
+  if (onRemove) head.append(embedRemoveBtn(onRemove))
+  node.appendChild(head)
+  if (meta.mime === 'application/pdf') {
+    const frame = document.createElement('iframe')
+    frame.src = fileContentUrl(meta.id)
+    frame.title = meta.filename
+    frame.setAttribute(
+      'style',
+      'width:100%;height:480px;border:0;display:block;border-top:1px solid var(--border);background:#fff;',
+    )
+    node.appendChild(frame)
+  }
+}
+
 /** Fill an embed placeholder with a plain note (unresolved / wanted embed) + a remove affordance. */
 function renderEmbedNote(node: HTMLElement, msg: string, onRemove?: () => void): void {
   node.innerHTML = ''
@@ -200,7 +250,26 @@ export function WikiEditor({
   const [pendingEmbedRemove, setPendingEmbedRemove] = useState<{
     node: HTMLElement
     title: string
+    /** 'file' = attachment embed (the uploaded blob is kept); default = datatable embed. */
+    kind?: 'file'
   } | null>(null)
+
+  const app = useApp()
+  // File storage gating: uploads/attach affordances only when the store has S3/R2
+  // config. Refetched per project (the editor remounts on view/project changes).
+  const [storageOn, setStorageOn] = useState(false)
+  const projectKey = app.project?.project ?? ''
+  // biome-ignore lint/correctness/useExhaustiveDependencies: refetch when the project changes
+  useEffect(() => {
+    let alive = true
+    filesApi
+      .status()
+      .then((s) => alive && setStorageOn(s.configured))
+      .catch(() => alive && setStorageOn(false))
+    return () => {
+      alive = false
+    }
+  }, [projectKey])
 
   const pagesRef = useRef(pages)
   pagesRef.current = pages
@@ -298,6 +367,37 @@ export function WikiEditor({
     }
   }, [resolveTitle, onOpenPage, sizeTables, readOnly])
 
+  // Fill each `![[file:<id>|name]]` placeholder with its attachment card (download link,
+  // inline PDF viewer). Same never-serialize rule as datatable embeds: the wrapper is
+  // contenteditable=false and htmlToMarkdown re-emits the marker from its data attributes.
+  const hydrateFileEmbeds = useCallback(() => {
+    const ed = edRef.current
+    if (!ed) return
+    const cache = new Map<string, Promise<FileMeta | null>>()
+    for (const node of ed.querySelectorAll<HTMLElement>('[data-file-embed]')) {
+      if (node.dataset.embedHydrated === '1') continue
+      node.dataset.embedHydrated = '1'
+      const id = node.getAttribute('data-file-embed') ?? ''
+      const name = node.getAttribute('data-file-name') || 'attachment'
+      const onRemove = readOnly
+        ? undefined
+        : () => setPendingEmbedRemove({ node, title: name, kind: 'file' })
+      let pending = cache.get(id)
+      if (!pending) {
+        pending = filesApi.meta(id).catch(() => null)
+        cache.set(id, pending)
+      }
+      void pending.then((meta) => {
+        if (!node.isConnected) return
+        if (!meta) {
+          renderEmbedNote(node, `⚠ attachment missing (${name})`, onRemove)
+          return
+        }
+        renderFileEmbed(node, meta, onRemove)
+      })
+    }
+  }, [readOnly])
+
   // Re-resolve embeds when the page list arrives or changes. On a hard reload the load effect
   // hydrates before `pages` has loaded, so `![[Title]]` embeds can't find their target and fall
   // back to the "no such page" note; re-running hydration once the list is available resolves
@@ -306,7 +406,8 @@ export function WikiEditor({
   // biome-ignore lint/correctness/useExhaustiveDependencies: re-run on the pages-list identity
   useEffect(() => {
     hydrateEmbeds()
-  }, [pages, hydrateEmbeds])
+    hydrateFileEmbeds()
+  }, [pages, hydrateEmbeds, hydrateFileEmbeds])
 
   const autosave = useAutosave(onSave)
   useEffect(() => {
@@ -333,6 +434,7 @@ export function WikiEditor({
     setTokens(estimateTokens(page.body))
     sizeTables()
     hydrateEmbeds()
+    hydrateFileEmbeds()
   }, [page.id])
 
   // Reflect EXTERNAL edits to the open page (an agent/CLI wrote it; the live-refresh
@@ -349,6 +451,7 @@ export function WikiEditor({
     if (dual) setMd(page.body)
     sizeTables()
     hydrateEmbeds()
+    hydrateFileEmbeds()
   }, [page.body])
 
   // Sync the dual-pane markdown source when it opens or the page changes. Without
@@ -370,6 +473,85 @@ export function WikiEditor({
     autosave.schedule(nextMd)
     if (dual) setMd(nextMd)
   }, [autosave, dual])
+
+  // --- file uploads (paste / drop / attach button) ---
+
+  /** Insert block-level HTML after the caret's top-level block (or append at the end). */
+  const insertBlockAtCaret = useCallback(
+    (html: string) => {
+      const ed = edRef.current
+      if (!ed) return
+      const tpl = document.createElement('template')
+      tpl.innerHTML = html
+      const nodes = [...tpl.content.childNodes]
+      const s = window.getSelection()
+      let anchorBlock: HTMLElement | null = null
+      if (s?.rangeCount) {
+        let n: Node | null = s.getRangeAt(0).commonAncestorContainer
+        while (n && n !== ed && n.parentNode !== ed) n = n.parentNode
+        if (n && n !== ed && n.parentNode === ed) anchorBlock = n as HTMLElement
+      }
+      if (anchorBlock) anchorBlock.after(...nodes)
+      else ed.append(...nodes)
+      persist()
+    },
+    [persist],
+  )
+
+  const uploadFiles = useCallback(
+    async (list: File[]) => {
+      if (readOnly || list.length === 0) return
+      if (!storageOn) {
+        app.toast('File storage isn’t configured — set it up in Settings (⚙)')
+        return
+      }
+      for (const f of list) {
+        try {
+          app.toast(`Uploading ${f.name}…`)
+          const meta = await filesApi.upload(f)
+          if (meta.mime.startsWith('image/') && meta.mime !== 'image/svg+xml') {
+            insertBlockAtCaret(fileImgHtml(meta.id, meta.filename))
+          } else {
+            insertBlockAtCaret(fileEmbedHtml(meta.id, meta.filename))
+            hydrateFileEmbeds()
+          }
+          app.toast(`Uploaded ${f.name}`)
+        } catch (e) {
+          app.toast(e instanceof Error ? `Upload failed: ${e.message}` : `Upload failed: ${f.name}`)
+        }
+      }
+      void autosave.flush()
+    },
+    [readOnly, storageOn, app.toast, insertBlockAtCaret, hydrateFileEmbeds, autosave.flush],
+  )
+
+  const onPaste = useCallback(
+    (e: React.ClipboardEvent) => {
+      const files = [...(e.clipboardData?.files ?? [])]
+      if (files.length === 0) return
+      // Always intercept file pastes: without storage the default contenteditable
+      // behavior inserts a data: image that the serializer drops silently.
+      e.preventDefault()
+      void uploadFiles(files)
+    },
+    [uploadFiles],
+  )
+
+  const onDrop = useCallback(
+    (e: React.DragEvent) => {
+      const files = [...(e.dataTransfer?.files ?? [])]
+      if (files.length === 0) return
+      e.preventDefault()
+      void uploadFiles(files)
+    },
+    [uploadFiles],
+  )
+
+  const onDragOver = useCallback((e: React.DragEvent) => {
+    if (e.dataTransfer?.types.includes('Files')) e.preventDefault()
+  }, [])
+
+  const fileInputRef = useRef<HTMLInputElement>(null)
 
   // --- wikilink autocomplete ([[) ---
   const closeLinkMenu = useCallback(() => {
@@ -880,6 +1062,9 @@ export function WikiEditor({
             onKeyUp={onKeyUp}
             onKeyDown={onKeyDown}
             onClick={onClick}
+            onPaste={onPaste}
+            onDrop={onDrop}
+            onDragOver={onDragOver}
             onBlur={() => void autosave.flush()}
             onMouseUp={() => setTimeout(checkSelection, 0)}
             onMouseOver={onOver}
@@ -897,6 +1082,30 @@ export function WikiEditor({
               {formatTokens(tokens)}
             </span>
             <span style={sx('flex:1;')} />
+            {!readOnly && storageOn && (
+              <>
+                <input
+                  ref={fileInputRef}
+                  type="file"
+                  multiple
+                  style={{ display: 'none' }}
+                  onChange={(e) => {
+                    const files = [...(e.target.files ?? [])]
+                    e.target.value = ''
+                    void uploadFiles(files)
+                  }}
+                />
+                <span
+                  onClick={() => fileInputRef.current?.click()}
+                  title="Upload a file to the bucket and embed it here (or paste / drop)"
+                  style={sx(
+                    'cursor:pointer;color:var(--ink-soft);border:1px solid var(--border);border-radius:6px;padding:2px 8px;',
+                  )}
+                >
+                  📎 Attach
+                </span>
+              </>
+            )}
             <SaveBadge status={autosave.status} />
           </div>
         </div>
@@ -1146,7 +1355,11 @@ export function WikiEditor({
       {pendingEmbedRemove && (
         <ConfirmDialog
           heading="Remove embed"
-          message={`Remove the embedded “${pendingEmbedRemove.title}” table from this page? Only this reference is removed — the datatable itself is kept.`}
+          message={
+            pendingEmbedRemove.kind === 'file'
+              ? `Remove the “${pendingEmbedRemove.title}” attachment from this page? Only this reference is removed — the uploaded file stays in the bucket.`
+              : `Remove the embedded “${pendingEmbedRemove.title}” table from this page? Only this reference is removed — the datatable itself is kept.`
+          }
           confirmLabel="Remove embed"
           onConfirm={() => {
             pendingEmbedRemove.node.remove()

@@ -14,7 +14,32 @@ import { wlSpan } from './wikilinks'
 function esc(t: string): string {
   const d = document.createElement('div')
   d.textContent = t
-  return d.innerHTML
+  // textContent→innerHTML escapes & < > but NOT quotes; this helper is interpolated
+  // into attribute values (alt, data-embed-title), where an unescaped `"` breaks out
+  // of the attribute and lets `onerror=…` land on the element itself.
+  return d.innerHTML.replace(/"/g, '&quot;')
+}
+
+/** Strict whitelist for file references: a ULID (Crockford base32, 26 chars). */
+const FILE_ID = '[0-9A-HJKMNP-TV-Z]{26}'
+const FILE_ID_EXACT = new RegExp(`^${FILE_ID}$`)
+
+/**
+ * The ONLY thing that ever renders as an <img>: `![alt](bctx-file://<ULID>)`.
+ * The src is constructed from the validated ULID — never from user-supplied URLs —
+ * so `![x](javascript:…)` / `![x](https://…)` stay literal text (XSS-safe by
+ * construction; alt is escaped).
+ */
+export function fileImgHtml(id: string, alt: string): string {
+  return `<img src="/api/files/${id}/content" alt="${esc(alt)}" data-file-id="${id}" style="max-width:100%;border-radius:9px;">`
+}
+
+/** Serialize a whitelisted file <img> back to markdown; any other <img> is dropped. */
+function imgMd(el: HTMLElement): string {
+  const id = el.getAttribute('data-file-id') || ''
+  if (!FILE_ID_EXACT.test(id)) return ''
+  const alt = (el.getAttribute('alt') || '').replace(/[\]\n]/g, ' ')
+  return `![${alt}](bctx-file://${id})`
 }
 
 /** Serialize editor HTML to markdown. Mirrors the reference html2md, with wikilinks
@@ -33,7 +58,8 @@ export function htmlToMarkdown(html: string): string {
         const t = el.tagName
         if (el.hasAttribute('data-link')) {
           s += `[[${el.getAttribute('data-title') || el.textContent}]]`
-        } else if (t === 'STRONG' || t === 'B') s += `**${inline(el)}**`
+        } else if (t === 'IMG') s += imgMd(el)
+        else if (t === 'STRONG' || t === 'B') s += `**${inline(el)}**`
         else if (t === 'EM' || t === 'I') s += `*${inline(el)}*`
         else if (t === 'CODE') s += `\`${el.textContent}\``
         else if (t === 'BR') s += '\n'
@@ -85,11 +111,21 @@ export function htmlToMarkdown(html: string): string {
         out.push(serializeTable({ header, alignments, rows: bodyRows }))
       }
     } else if (t === 'HR') out.push('---')
-    else if (t === 'DIV') {
+    else if (t === 'IMG') {
+      const md = imgMd(el)
+      if (md) out.push(md)
+    } else if (t === 'DIV') {
       // An embed placeholder round-trips to its `![[Title]]` marker — never serialize the
       // hydrated table inside it (that would inline the datatable into the consuming page).
       if (el.hasAttribute('data-embed-title')) {
         out.push(`![[${el.getAttribute('data-embed-title')}]]`)
+        return
+      }
+      // Same rule for file-attachment placeholders (hydrated card is never serialized).
+      if (el.hasAttribute('data-file-embed')) {
+        const id = el.getAttribute('data-file-embed') || ''
+        const name = el.getAttribute('data-file-name') || ''
+        out.push(`![[file:${id}${name ? `|${name}` : ''}]]`)
         return
       }
       const box = el.querySelector(':scope > .task-box')
@@ -118,7 +154,7 @@ export function markdownToHtml(md: string, resolveTitle: (title: string) => stri
   const blocks: string[] = []
   let i = 0
 
-  const renderInline = (text: string): string => {
+  const renderLinks = (text: string): string => {
     // Pull wikilinks out first so their inner text isn't re-escaped/formatted.
     const parts: string[] = []
     let last = 0
@@ -132,6 +168,22 @@ export function markdownToHtml(md: string, resolveTitle: (title: string) => stri
       m = re.exec(text)
     }
     parts.push(fmt(esc(text.slice(last))))
+    return parts.join('')
+  }
+  const renderInline = (text: string): string => {
+    // File images are pulled out before everything else (same technique as wikilinks);
+    // only the validated bctx-file ULID form ever becomes an <img> — see fileImgHtml.
+    const parts: string[] = []
+    let last = 0
+    const re = new RegExp(`!\\[([^\\]\\n]*)\\]\\(bctx-file://(${FILE_ID})\\)`, 'g')
+    let m: RegExpExecArray | null = re.exec(text)
+    while (m) {
+      parts.push(renderLinks(text.slice(last, m.index)))
+      parts.push(fileImgHtml(m[2] ?? '', m[1] ?? ''))
+      last = m.index + m[0].length
+      m = re.exec(text)
+    }
+    parts.push(renderLinks(text.slice(last)))
     return parts.join('')
   }
   const fmt = (s: string): string =>
@@ -157,6 +209,18 @@ export function markdownToHtml(md: string, resolveTitle: (title: string) => stri
       while (i < lines.length && !at(i).startsWith('```')) buf.push(at(i++))
       i++ // closing fence
       blocks.push(`<pre style="${S.code}">${esc(buf.join('\n'))}</pre>`)
+      continue
+    }
+    // A file attachment on its own line — `![[file:<ULID>|name]]` — becomes a placeholder
+    // card that WikiEditor hydrates from /api/files metadata (PDF viewer / download card).
+    // Checked BEFORE the generic transclusion so `file:` never resolves as a page title.
+    const fileEmbedMatch = new RegExp(
+      `^\\s*!\\[\\[\\s*file:(${FILE_ID})\\s*(?:\\|([^\\]]*))?\\]\\]\\s*$`,
+      'i',
+    ).exec(line)
+    if (fileEmbedMatch?.[1]) {
+      blocks.push(fileEmbedHtml(fileEmbedMatch[1].toUpperCase(), (fileEmbedMatch[2] ?? '').trim()))
+      i++
       continue
     }
     // A transclusion on its own line — `![[Title]]` — becomes a non-editable embed placeholder
@@ -236,6 +300,15 @@ function tableHtml(
     )
     .join('')
   return `<table style="${S.table}"><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table>`
+}
+
+/**
+ * A non-editable placeholder for a `![[file:<id>|name]]` attachment; WikiEditor hydrates
+ * it into a download card / inline PDF viewer. Uses `data-file-embed` (NOT
+ * `data-embed-title`) so the datatable hydrator never touches it.
+ */
+export function fileEmbedHtml(id: string, name: string): string {
+  return `<div class="file-embed" data-file-embed="${id}" data-file-name="${esc(name)}" contenteditable="false" style="margin:0 0 20px;border:1px solid var(--border);border-radius:11px;overflow:hidden;"><div style="display:flex;align-items:center;gap:8px;padding:9px 14px;background:var(--code-bg);font:600 12px/1 'IBM Plex Mono',monospace;color:var(--muted);"><span>📎 ${esc(name || 'attachment')}</span></div><div style="padding:12px 14px;font:400 14px/1.5 'Spectral',serif;color:var(--muted);">Loading attachment…</div></div>`
 }
 
 /** A non-editable placeholder for a `![[Title]]` embed; WikiEditor hydrates the table into it. */

@@ -33,7 +33,7 @@ interface Detail {
   history: HistoryEntry[]
 }
 
-export function WikiView({ onNav }: { onNav: (v: 'wiki' | 'contexts') => void }) {
+export function WikiView({ onNav }: { onNav: (v: 'wiki' | 'contexts' | 'settings') => void }) {
   const app = useApp()
   const route = useRoute()
   const editorRef = useRef<WikiEditorHandle | null>(null)
@@ -61,18 +61,19 @@ export function WikiView({ onNav }: { onNav: (v: 'wiki' | 'contexts') => void })
     [pages, tagFilter],
   )
 
-  const onContextsRoute = route.parts[0] === 'contexts'
+  // Any route owned by another top-level view — navigating there must not bounce back.
+  const onOtherView = route.parts[0] === 'contexts' || route.parts[0] === 'settings'
   const routeId = route.parts[0] === 'page' ? route.parts[1] : undefined
   const activeId = routeId ?? pages[0]?.id ?? null
 
   // Default to the first page when at the wiki root, OR when the routed id is gone (e.g.
   // after a project switch the hash still points at the old project's page → blank pane).
-  // Guard against the `/contexts` route so switching tabs doesn't bounce back here.
+  // Guard against other views' routes so switching tabs doesn't bounce back here.
   useEffect(() => {
     const first = pages[0]
-    if (onContextsRoute || !first) return
+    if (onOtherView || !first) return
     if (!routeId || !pages.some((p) => p.id === routeId)) route.navigate(pageHref(first.id))
-  }, [onContextsRoute, routeId, pages, route])
+  }, [onOtherView, routeId, pages, route])
 
   const detail = useAsync<Detail>(async () => {
     if (!activeId) return { page: null, links: [], backlinks: [], history: [] }
@@ -344,6 +345,14 @@ export function WikiView({ onNav }: { onNav: (v: 'wiki' | 'contexts') => void })
       run: () => {
         setPaletteOpen(false)
         void onNew()
+      },
+    },
+    {
+      label: 'Settings',
+      hint: 'file storage, config',
+      run: () => {
+        setPaletteOpen(false)
+        onNav('settings')
       },
     },
   ]

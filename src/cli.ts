@@ -2,7 +2,9 @@
 import { Command } from 'commander'
 import { ZodError } from 'zod'
 import { addCommand } from './commands/add'
+import { configCommand } from './commands/config'
 import { exportCommand } from './commands/export'
+import { fileCommand } from './commands/file'
 import { getCommand } from './commands/get'
 import { importCommand } from './commands/import'
 import { initCommand } from './commands/init'
@@ -40,6 +42,9 @@ program.addCommand(initCommand())
 program.addCommand(statusCommand())
 // Project & sync management.
 program.addCommand(projectCommand())
+// Per-store config (in the DB, travels with the project) + S3/R2 file storage.
+program.addCommand(configCommand())
+program.addCommand(fileCommand())
 // Preferred workflow first.
 program.addCommand(wikiCommand())
 // Direct context operations (individual entries).
@@ -72,6 +77,12 @@ Individual context operations (single entries — CRUD):
   $ echo "Use pnpm, never npm" | bctx add --kind rule --tags tooling --agent claude
   $ bctx list --kind rule --json   ·   bctx search "pnpm"   ·   bctx get <id>
   $ bctx update <id> --add-tag important   ·   bctx rm <id>
+
+Files in S3/R2 (blobs in your bucket, metadata in the store):
+  $ bctx config set storage.endpoint https://<account>.r2.cloudflarestorage.com
+  $ bctx config set storage.bucket notes && bctx file test
+  $ bctx file add ./diagram.png      # prints wiki embed snippets
+  $ bctx file ls   ·   bctx file url <id>   ·   bctx file rm <id>
 
 Projects & online sync (same context across sessions, devices, members):
   $ bctx project create work          ·   bctx project use work

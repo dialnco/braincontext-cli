@@ -18,7 +18,7 @@ const KIND_DOT: Record<string, string> = {
   skill: '#cf7d9e',
 }
 
-export function ContextsView({ onNav }: { onNav: (v: 'wiki' | 'contexts') => void }) {
+export function ContextsView({ onNav }: { onNav: (v: 'wiki' | 'contexts' | 'settings') => void }) {
   const app = useApp()
   const [kind, setKind] = useState<Kind | ''>('')
   const [scope, setScope] = useState<Scope | ''>('')

@@ -1,11 +1,23 @@
 import type React from 'react'
 
-type IconName = 'search' | 'sun' | 'moon' | 'three' | 'focus' | 'dual' | 'close' | 'sync'
+type IconName = 'search' | 'sun' | 'moon' | 'three' | 'focus' | 'dual' | 'close' | 'sync' | 'gear'
 
 /** Inline single-colour SVG icons (currentColor) carried over from the reference. */
 export function Icon({ name, size = 16 }: { name: IconName; size?: number }): React.ReactElement {
   const p = { width: size, height: size, viewBox: '0 0 16 16', fill: 'none' as const }
   switch (name) {
+    case 'gear':
+      return (
+        <svg {...p}>
+          <circle cx="8" cy="8" r="2.2" stroke="currentColor" strokeWidth="1.4" />
+          <path
+            d="M8 1.8v2M8 12.2v2M1.8 8h2M12.2 8h2M3.6 3.6l1.4 1.4M11 11l1.4 1.4M12.4 3.6 11 5M5 11l-1.4 1.4"
+            stroke="currentColor"
+            strokeWidth="1.4"
+            strokeLinecap="round"
+          />
+        </svg>
+      )
     case 'search':
       return (
         <svg {...p}>

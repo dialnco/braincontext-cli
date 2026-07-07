@@ -622,6 +622,14 @@ export async function backlinks(db: Kysely<Database>, id: string): Promise<LinkV
   }))
 }
 
+/**
+ * `[[file:<id>|name]]` / `![[file:<id>|name]]` reference uploaded files (the `files`
+ * table), not pages — they must never become wanted links or lint red-links.
+ */
+function isFileRef(title: string): boolean {
+  return /^file:/i.test(title)
+}
+
 /** Re-derive the reserved `references` channel from [[..]] in a body, leaving explicit edges intact. */
 export async function syncBodyLinks(db: Kysely<Database>, id: string, body: string): Promise<void> {
   // One transaction so a concurrent reader never sees the transient zero-links state
@@ -633,6 +641,7 @@ export async function syncBodyLinks(db: Kysely<Database>, id: string, body: stri
       .where('type', '=', REFERENCES_LINK)
       .execute()
     for (const title of parseWikiLinks(body)) {
+      if (isFileRef(title)) continue
       await addLink(trx, id, { toTitle: title, type: REFERENCES_LINK })
     }
     // The parallel reserved channel: `![[Title]]` transclusion edges (datatable embeds).
@@ -642,6 +651,7 @@ export async function syncBodyLinks(db: Kysely<Database>, id: string, body: stri
       .where('type', '=', EMBEDS_LINK)
       .execute()
     for (const title of parseTransclusions(body)) {
+      if (isFileRef(title)) continue
       await addLink(trx, id, { toTitle: title, type: EMBEDS_LINK })
     }
   })

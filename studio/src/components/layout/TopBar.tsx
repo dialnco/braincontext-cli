@@ -2,7 +2,7 @@ import type { ProjectStatus } from '../../api/types'
 import { Hov, sx } from '../../lib/dc'
 import { Icon } from '../common/Icon'
 
-type View = 'wiki' | 'contexts'
+type View = 'wiki' | 'contexts' | 'settings'
 type Layout = 'three' | 'focus' | 'dual'
 
 interface Props {
@@ -172,6 +172,16 @@ export function TopBar(props: Props) {
             </div>
           </>
         )}
+        <Hov
+          base={sx(
+            'width:32px;height:32px;border-radius:8px;border:1px solid var(--border);background:var(--surface);display:flex;align-items:center;justify-content:center;cursor:pointer;color:var(--ink-soft);',
+          )}
+          hover={sx('border-color:var(--accent);color:var(--accent-ink);')}
+          onClick={() => props.onNav('settings')}
+          title="Settings"
+        >
+          <Icon name="gear" size={16} />
+        </Hov>
         <Hov
           base={sx(
             'width:32px;height:32px;border-radius:8px;border:1px solid var(--border);background:var(--surface);display:flex;align-items:center;justify-content:center;cursor:pointer;color:var(--ink-soft);',

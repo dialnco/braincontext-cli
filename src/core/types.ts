@@ -156,6 +156,33 @@ export interface PagePropertiesTable {
   type: string
 }
 
+/** Per-store key-value settings (namespaced keys, e.g. `storage.*`). See 0003. */
+export interface StoreConfigTable {
+  key: string
+  value: string
+  updated_at: string
+}
+
+/**
+ * Metadata/references for files stored in the configured S3-compatible bucket.
+ * The blobs live ONLY in object storage — never in this database. See 0003.
+ */
+export interface FilesTable {
+  id: string
+  /** Object key in the bucket: `<prefix>/files/<ulid>/<sanitized-name>`. */
+  object_key: string
+  filename: string
+  mime: string
+  size: number
+  sha256: string | null
+  agent_source: string | null
+  /** JSON-encoded free-form metadata. */
+  metadata: string
+  created_at: string
+  /** Soft delete keeps the id stable for dangling markdown references. */
+  deleted_at: string | null
+}
+
 export interface Database {
   contexts: ContextsTable
   tags: TagsTable
@@ -166,4 +193,6 @@ export interface Database {
   links: LinksTable
   wiki_log: WikiLogTable
   page_properties: PagePropertiesTable
+  store_config: StoreConfigTable
+  files: FilesTable
 }

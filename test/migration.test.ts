@@ -13,9 +13,9 @@ const tableExists = async (db: Awaited<ReturnType<typeof freshDb>>, name: string
   return (r.rows[0]?.n ?? 0) > 0
 }
 
-describe('migrations — incremental 0002 upgrades an existing store without data loss', () => {
-  it('applies 0002_page_properties to a store already at 0001, preserving data', async () => {
-    const db = await freshDb() // fully migrated (0001 + 0002)
+describe('migrations — incrementals upgrade an existing store without data loss', () => {
+  it('applies 0002 + 0003 to a store already at 0001, preserving data', async () => {
+    const db = await freshDb() // fully migrated (0001 + 0002 + 0003)
 
     // Seed real data BEFORE the "downgrade", to prove the migration preserves it.
     const page = await createPage(db, {
@@ -26,19 +26,30 @@ describe('migrations — incremental 0002 upgrades an existing store without dat
     })
 
     // Simulate an OLD store that only ran 0001 (the exact edumetrics starting state):
-    // drop the derived table and forget its migration record.
+    // drop the incremental tables and forget their migration records.
     await sql`DROP TABLE page_properties`.execute(db)
-    await sql`DELETE FROM kysely_migration WHERE name = '0002_page_properties'`.execute(db)
+    await sql`DROP TABLE files`.execute(db)
+    await sql`DROP TABLE store_config`.execute(db)
+    await sql`DELETE FROM kysely_migration WHERE name IN ('0002_page_properties', '0003_file_storage')`.execute(
+      db,
+    )
     expect(await tableExists(db, 'page_properties')).toBe(false)
+    expect(await tableExists(db, 'files')).toBe(false)
 
-    // The upgrade path: opening the store re-runs migrations → 0002 applies.
+    // The upgrade path: opening the store re-runs migrations → 0002 and 0003 apply.
     await migrateToLatest(db)
     expect(await tableExists(db, 'page_properties')).toBe(true)
+    expect(await tableExists(db, 'files')).toBe(true)
+    expect(await tableExists(db, 'store_config')).toBe(true)
 
     const applied = await sql<{
       name: string
     }>`SELECT name FROM kysely_migration ORDER BY name`.execute(db)
-    expect(applied.rows.map((r) => r.name)).toEqual(['0001_init', '0002_page_properties'])
+    expect(applied.rows.map((r) => r.name)).toEqual([
+      '0001_init',
+      '0002_page_properties',
+      '0003_file_storage',
+    ])
 
     // Data survived the migration untouched.
     const still = await getContext(db, page.id)

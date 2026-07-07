@@ -3,6 +3,7 @@ import { DARK, LIGHT } from './lib/theme'
 import { useRoute } from './state/router'
 import { StoreProvider, useApp } from './state/StoreContext'
 import { ContextsView } from './views/ContextsView'
+import { SettingsView } from './views/SettingsView'
 import { WikiView } from './views/WikiView'
 import './styles/studio.css'
 
@@ -14,8 +15,10 @@ import './styles/studio.css'
 function Shell() {
   const app = useApp()
   const route = useRoute()
-  const view = route.parts[0] === 'contexts' ? 'contexts' : 'wiki'
-  const onNav = (v: 'wiki' | 'contexts') => route.navigate(v === 'contexts' ? '/contexts' : '/')
+  const view =
+    route.parts[0] === 'contexts' ? 'contexts' : route.parts[0] === 'settings' ? 'settings' : 'wiki'
+  const onNav = (v: 'wiki' | 'contexts' | 'settings') =>
+    route.navigate(v === 'contexts' ? '/contexts' : v === 'settings' ? '/settings' : '/')
 
   const vars = {
     ...(app.theme === 'dark' ? DARK : LIGHT),
@@ -32,7 +35,13 @@ function Shell() {
   return (
     <div style={{ position: 'fixed', inset: 0, overflow: 'hidden' }}>
       <div style={vars}>
-        {view === 'contexts' ? <ContextsView onNav={onNav} /> : <WikiView onNav={onNav} />}
+        {view === 'contexts' ? (
+          <ContextsView onNav={onNav} />
+        ) : view === 'settings' ? (
+          <SettingsView onNav={onNav} />
+        ) : (
+          <WikiView onNav={onNav} />
+        )}
       </div>
     </div>
   )
