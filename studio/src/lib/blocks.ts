@@ -206,8 +206,17 @@ export function transformBlock(blk: HTMLElement, type: BlockType): void {
   caretToStart(el)
 }
 
+/** A slash-menu row: either a block transform (`type`) or a non-block action (`action`). */
+export interface SlashItem {
+  label: string
+  hint: string
+  type?: BlockType
+  /** A non-block action (currently only 'attach', which opens the file picker). */
+  action?: 'attach'
+}
+
 /** The slash-menu insertable block list. */
-export const SLASH_ITEMS: { label: string; hint: string; type: BlockType }[] = [
+export const SLASH_ITEMS: SlashItem[] = [
   { label: 'Heading 1', hint: '#', type: 'h1' },
   { label: 'Heading 2', hint: '##', type: 'h2' },
   { label: 'Heading 3', hint: '###', type: 'h3' },

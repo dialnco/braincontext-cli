@@ -143,6 +143,9 @@ export function htmlToMarkdown(html: string): string {
       } else out.push(inline(el))
     } else out.push(inline(el))
   })
+  // Drop trailing empty blocks (e.g. the empty paragraph markdownToHtml appends after a
+  // trailing atom so the caret isn't trapped) so the markdown round-trip stays byte-stable.
+  while (out.length && !out[out.length - 1]?.trim()) out.pop()
   return out.join('\n\n')
 }
 
@@ -267,6 +270,14 @@ export function markdownToHtml(md: string, resolveTitle: (title: string) => stri
       continue
     } else blocks.push(`<p style="${S.p}">${renderInline(line)}</p>`)
     i++
+  }
+  // A non-editable atom (file/table embed) or a bare <hr>/<table> as the LAST block
+  // leaves no caret position after it in contenteditable, trapping the user. Append an
+  // empty paragraph so there's always somewhere to click/type below. It serializes to
+  // nothing (htmlToMarkdown trims trailing empties), so the round-trip stays stable.
+  const last = blocks[blocks.length - 1]
+  if (last && (last.includes('contenteditable="false"') || /^<(hr|table)\b/.test(last))) {
+    blocks.push(`<p style="${S.p}"><br></p>`)
   }
   return blocks.join('\n') || `<p style="${S.p}"><br></p>`
 }

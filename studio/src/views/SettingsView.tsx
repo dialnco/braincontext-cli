@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react'
 import { ApiError } from '../api/client'
-import { type FileMeta, filesApi, type StorageStatus } from '../api/files'
+import { type FileMeta, fileContentUrl, filesApi, type StorageStatus } from '../api/files'
 import { Icon } from '../components/common/Icon'
 import { Hov, sx } from '../lib/dc'
 import { useApp } from '../state/StoreContext'
@@ -18,6 +18,58 @@ function human(bytes: number): string {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
 }
 
+/** A short, human-friendly type name derived from a MIME string (raw MIME is unreadable). */
+function typeLabel(mime: string): string {
+  const m = mime.toLowerCase()
+  if (m.includes('wordprocessingml') || m === 'application/msword') return 'Word'
+  if (m.includes('spreadsheetml') || m === 'application/vnd.ms-excel') return 'Excel'
+  if (m.includes('presentationml') || m === 'application/vnd.ms-powerpoint') return 'PowerPoint'
+  if (m === 'application/pdf') return 'PDF'
+  if (m.startsWith('image/')) return 'Image'
+  if (m.startsWith('video/')) return 'Video'
+  if (m.startsWith('audio/')) return 'Audio'
+  if (m === 'application/zip' || m.includes('compressed')) return 'Zip'
+  if (m === 'application/json') return 'JSON'
+  if (m.startsWith('text/')) return 'Text'
+  // Fallback: the subtype minus vendor noise, capitalized (e.g. octet-stream → Octet-stream).
+  const sub = m.split('/')[1] ?? m
+  const clean = sub.split(/[.+]/).pop() || sub
+  return clean ? clean.charAt(0).toUpperCase() + clean.slice(1) : 'File'
+}
+
+/** Calendar-month bucket key (`YYYY-MM`, sortable) + display label (`July 2026`). */
+function monthBucket(iso: string): { key: string; label: string } {
+  const d = new Date(iso)
+  if (Number.isNaN(d.getTime())) return { key: '0000-00', label: 'Unknown date' }
+  const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`
+  return { key, label: d.toLocaleString('en-US', { month: 'long', year: 'numeric' }) }
+}
+
+interface FileGroup {
+  key: string
+  label: string
+  items: FileMeta[]
+}
+
+/** Bucket files by month or friendly type; files within a group sorted largest-first. */
+function groupFiles(files: FileMeta[], groupBy: 'date' | 'type'): FileGroup[] {
+  const groups = new Map<string, FileGroup>()
+  for (const f of files) {
+    const { key, label } =
+      groupBy === 'date'
+        ? monthBucket(f.createdAt)
+        : { key: typeLabel(f.mime), label: typeLabel(f.mime) }
+    const g = groups.get(key) ?? { key, label, items: [] }
+    g.items.push(f)
+    groups.set(key, g)
+  }
+  const out = [...groups.values()]
+  for (const g of out) g.items.sort((a, b) => b.size - a.size)
+  if (groupBy === 'date') out.sort((a, b) => (a.key < b.key ? 1 : a.key > b.key ? -1 : 0))
+  else out.sort((a, b) => b.items.length - a.items.length || a.label.localeCompare(b.label))
+  return out
+}
+
 /**
  * Store settings (#/settings). Currently one section: S3/R2 file storage. The
  * secret is write-only — it is submitted only when the field is non-empty and is
@@ -30,6 +82,9 @@ export function SettingsView({ onNav }: { onNav: (v: 'wiki' | 'contexts' | 'sett
   const [busy, setBusy] = useState(false)
   /** Two-click delete: first click arms the row, second click deletes. */
   const [pendingDelete, setPendingDelete] = useState<string | null>(null)
+  /** File-list grouping dimension + which group headers are collapsed. */
+  const [groupBy, setGroupBy] = useState<'date' | 'type'>('date')
+  const [collapsed, setCollapsed] = useState<Set<string>>(new Set())
 
   const [endpoint, setEndpoint] = useState('')
   const [region, setRegion] = useState('')
@@ -110,6 +165,14 @@ export function SettingsView({ onNav }: { onNav: (v: 'wiki' | 'contexts' | 'sett
       app.toast(e instanceof ApiError ? e.message : 'Delete failed')
     }
   }
+
+  const toggleGroup = (key: string) =>
+    setCollapsed((s) => {
+      const n = new Set(s)
+      if (n.has(key)) n.delete(key)
+      else n.add(key)
+      return n
+    })
 
   return (
     <>
@@ -238,49 +301,99 @@ export function SettingsView({ onNav }: { onNav: (v: 'wiki' | 'contexts' | 'sett
 
           {status?.configured && (
             <>
-              <h3 style={sx("font:600 15px 'Spectral',serif;color:var(--ink);margin:36px 0 8px;")}>
-                Uploaded files ({files.length})
-              </h3>
+              <div
+                style={sx(
+                  'display:flex;align-items:center;justify-content:space-between;gap:12px;margin:36px 0 8px;',
+                )}
+              >
+                <h3 style={sx("font:600 15px 'Spectral',serif;color:var(--ink);margin:0;")}>
+                  Uploaded files ({files.length})
+                </h3>
+                {files.length > 0 && (
+                  <div
+                    style={sx(
+                      'display:flex;border:1px solid var(--border);border-radius:8px;overflow:hidden;',
+                    )}
+                  >
+                    {(['date', 'type'] as const).map((g) => (
+                      <button
+                        key={g}
+                        type="button"
+                        onClick={() => setGroupBy(g)}
+                        style={sx(
+                          `padding:4px 12px;border:none;cursor:pointer;font:600 11px 'IBM Plex Mono';text-transform:capitalize;${groupBy === g ? 'background:var(--accent);color:#fff;' : 'background:var(--surface);color:var(--ink-soft);'}`,
+                        )}
+                      >
+                        {g}
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
               {files.length === 0 && (
                 <p style={sx("font:400 13px 'IBM Plex Sans';color:var(--muted);")}>
                   No files yet. Paste or drop a file into a wiki page, or run `bctx file add`.
                 </p>
               )}
-              {files.map((f) => (
-                <div
-                  key={f.id}
-                  style={sx(
-                    'display:flex;align-items:center;gap:10px;padding:8px 4px;border-bottom:1px solid var(--border);',
-                  )}
-                >
-                  <span
-                    style={sx(
-                      "flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font:500 13px 'IBM Plex Sans';color:var(--ink);",
-                    )}
-                    title={f.id}
-                  >
-                    {f.filename}
-                  </span>
-                  <span style={sx("font:400 11.5px 'IBM Plex Mono';color:var(--muted);")}>
-                    {human(f.size)} · {f.mime}
-                  </span>
-                  <Hov
-                    as="span"
-                    base={sx(
-                      `cursor:pointer;font:500 12px 'IBM Plex Sans';color:${pendingDelete === f.id ? '#c0564a' : 'var(--muted)'};padding:3px 8px;border-radius:6px;`,
-                    )}
-                    hover={sx('background:var(--accent-soft);color:#c0564a;')}
-                    onClick={() => removeFile(f)}
-                    title={
-                      pendingDelete === f.id
-                        ? 'Pages embedding it will show a missing-file note'
-                        : undefined
-                    }
-                  >
-                    {pendingDelete === f.id ? 'Really delete?' : 'Delete'}
-                  </Hov>
-                </div>
-              ))}
+              {groupFiles(files, groupBy).map((group) => {
+                const open = !collapsed.has(group.key)
+                return (
+                  <div key={group.key} style={sx('margin-bottom:6px;')}>
+                    <Hov
+                      base={sx(
+                        "display:flex;align-items:center;gap:8px;padding:7px 4px;cursor:pointer;font:600 11px 'IBM Plex Mono';letter-spacing:.04em;text-transform:uppercase;color:var(--muted);border-bottom:1px solid var(--border);",
+                      )}
+                      hover={sx('color:var(--ink-soft);')}
+                      onClick={() => toggleGroup(group.key)}
+                    >
+                      <span style={sx('width:10px;')}>{open ? '▾' : '▸'}</span>
+                      <span>{group.label}</span>
+                      <span style={sx('color:var(--border);')}>({group.items.length})</span>
+                    </Hov>
+                    {open &&
+                      group.items.map((f) => (
+                        <div
+                          key={f.id}
+                          style={sx(
+                            'display:flex;align-items:center;gap:10px;padding:8px 4px;border-bottom:1px solid var(--border);',
+                          )}
+                        >
+                          <a
+                            href={fileContentUrl(f.id, true)}
+                            title={`Download — ${f.id}`}
+                            style={sx(
+                              "flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font:500 13px 'IBM Plex Sans';color:var(--ink);text-decoration:none;",
+                            )}
+                          >
+                            {f.filename}
+                          </a>
+                          <span
+                            style={sx(
+                              "flex:0 0 auto;white-space:nowrap;font:400 11.5px 'IBM Plex Mono';color:var(--muted);",
+                            )}
+                          >
+                            {human(f.size)} · {typeLabel(f.mime)}
+                          </span>
+                          <Hov
+                            as="span"
+                            base={sx(
+                              `cursor:pointer;font:500 12px 'IBM Plex Sans';color:${pendingDelete === f.id ? '#c0564a' : 'var(--muted)'};padding:3px 8px;border-radius:6px;`,
+                            )}
+                            hover={sx('background:var(--accent-soft);color:#c0564a;')}
+                            onClick={() => removeFile(f)}
+                            title={
+                              pendingDelete === f.id
+                                ? 'Pages embedding it will show a missing-file note'
+                                : undefined
+                            }
+                          >
+                            {pendingDelete === f.id ? 'Really delete?' : 'Delete'}
+                          </Hov>
+                        </div>
+                      ))}
+                  </div>
+                )
+              })}
             </>
           )}
         </div>

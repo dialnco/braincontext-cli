@@ -9,12 +9,14 @@ import {
   type BlockType,
   blockLabel,
   blockTypeOf,
+  caretToStart,
   currentBlock,
   isCallout,
   isTask,
   type MenuPos,
   placeMenu,
   SLASH_ITEMS,
+  type SlashItem,
   stripLeading,
   textBeforeCaret,
   transformBlock,
@@ -252,12 +254,23 @@ export function WikiEditor({
     title: string
     /** 'file' = attachment embed (the uploaded blob is kept); default = datatable embed. */
     kind?: 'file'
+    /** The file id, when kind === 'file' — used to check references / optionally delete. */
+    fileId?: string
   } | null>(null)
+  // For a pending file-embed removal: number of OTHER pages referencing the blob (0 = safe
+  // to fully delete), or null while checking / on error. Drives the "also delete" affordance.
+  const [fileOtherRefs, setFileOtherRefs] = useState<number | null>(null)
+  const [alsoDeleteFile, setAlsoDeleteFile] = useState(false)
 
   const app = useApp()
   // File storage gating: uploads/attach affordances only when the store has S3/R2
   // config. Refetched per project (the editor remounts on view/project changes).
   const [storageOn, setStorageOn] = useState(false)
+  // True while files are dragged over the editor — drives the drop overlay.
+  const [dragOver, setDragOver] = useState(false)
+  // Current attach-availability, read by the slash-menu callbacks without re-creating them.
+  const canAttachRef = useRef(false)
+  canAttachRef.current = storageOn && !readOnly
   const projectKey = app.project?.project ?? ''
   // biome-ignore lint/correctness/useExhaustiveDependencies: refetch when the project changes
   useEffect(() => {
@@ -270,6 +283,28 @@ export function WikiEditor({
       alive = false
     }
   }, [projectKey])
+
+  // When a file embed is armed for removal, check whether the blob is referenced on any
+  // OTHER page. If not, the confirm dialog offers to permanently delete the file too. The
+  // current page still contains the marker (autosave hasn't run), so it's excluded.
+  useEffect(() => {
+    setAlsoDeleteFile(false)
+    setFileOtherRefs(null)
+    const p = pendingEmbedRemove
+    if (p?.kind !== 'file' || !p.fileId) return
+    let alive = true
+    filesApi
+      .references(p.fileId)
+      .then((r) => {
+        if (alive) setFileOtherRefs(r.references.filter((x) => x.id !== page.id).length)
+      })
+      .catch(() => {
+        if (alive) setFileOtherRefs(null)
+      })
+    return () => {
+      alive = false
+    }
+  }, [pendingEmbedRemove, page.id])
 
   const pagesRef = useRef(pages)
   pagesRef.current = pages
@@ -381,7 +416,7 @@ export function WikiEditor({
       const name = node.getAttribute('data-file-name') || 'attachment'
       const onRemove = readOnly
         ? undefined
-        : () => setPendingEmbedRemove({ node, title: name, kind: 'file' })
+        : () => setPendingEmbedRemove({ node, title: name, kind: 'file', fileId: id })
       let pending = cache.get(id)
       if (!pending) {
         pending = filesApi.meta(id).catch(() => null)
@@ -493,6 +528,20 @@ export function WikiEditor({
       }
       if (anchorBlock) anchorBlock.after(...nodes)
       else ed.append(...nodes)
+      // A trailing non-editable atom (file/table embed) leaves no caret slot after it,
+      // trapping the user. Ensure an empty paragraph follows so typing can continue below.
+      const lastNode = nodes[nodes.length - 1]
+      if (
+        lastNode instanceof HTMLElement &&
+        lastNode.getAttribute('contenteditable') === 'false' &&
+        ed.lastChild === lastNode
+      ) {
+        const p = document.createElement('p')
+        p.setAttribute('style', S.p)
+        p.innerHTML = '<br>'
+        lastNode.after(p)
+        caretToStart(p)
+      }
       persist()
     },
     [persist],
@@ -539,6 +588,7 @@ export function WikiEditor({
 
   const onDrop = useCallback(
     (e: React.DragEvent) => {
+      setDragOver(false)
       const files = [...(e.dataTransfer?.files ?? [])]
       if (files.length === 0) return
       e.preventDefault()
@@ -547,8 +597,19 @@ export function WikiEditor({
     [uploadFiles],
   )
 
-  const onDragOver = useCallback((e: React.DragEvent) => {
-    if (e.dataTransfer?.types.includes('Files')) e.preventDefault()
+  const onDragOver = useCallback(
+    (e: React.DragEvent) => {
+      if (readOnly || !e.dataTransfer?.types.includes('Files')) return
+      e.preventDefault() // mark the editor a valid drop target
+      if (storageOn) setDragOver(true)
+    },
+    [readOnly, storageOn],
+  )
+
+  // dragleave also fires when moving onto a child — only clear once the pointer has
+  // actually left the host container (relatedTarget outside it, or null off-window).
+  const onDragLeave = useCallback((e: React.DragEvent) => {
+    if (!hostRef.current?.contains(e.relatedTarget as Node | null)) setDragOver(false)
   }, [])
 
   const fileInputRef = useRef<HTMLInputElement>(null)
@@ -670,7 +731,7 @@ export function WikiEditor({
     if (!m) return closeSlash()
     slashBlk.current = blk
     const q = m[1] ?? ''
-    const rows = slashRows(q)
+    const rows = slashRows(q, canAttachRef.current)
     const pos = placeMenu(host, r.getBoundingClientRect(), 228, rows.length, 32, 38)
     setSlashMenu((prev) => ({
       open: true,
@@ -681,13 +742,20 @@ export function WikiEditor({
   }, [closeSlash])
 
   const runSlash = useCallback(
-    (type: BlockType) => {
+    (item: SlashItem) => {
       const blk = slashBlk.current
       const q = slashMenu.q
       closeSlash()
       if (!blk) return
-      stripLeading(blk, 1 + q.length)
-      transformBlock(blk, type)
+      stripLeading(blk, 1 + q.length) // drop the typed "/query"
+      if (item.action === 'attach') {
+        // Leave the (now empty) line and open the native picker; the chosen file is
+        // inserted by uploadFiles just like the 📎 button / paste / drop paths.
+        persist()
+        fileInputRef.current?.click()
+        return
+      }
+      if (item.type) transformBlock(blk, item.type)
       persist()
       edRef.current?.focus()
     },
@@ -911,7 +979,7 @@ export function WikiEditor({
   const onKeyDown = useCallback(
     (e: React.KeyboardEvent) => {
       if (slashMenu.open) {
-        const rows = slashRows(slashMenu.q)
+        const rows = slashRows(slashMenu.q, canAttachRef.current)
         if (e.key === 'ArrowDown') {
           e.preventDefault()
           setSlashMenu((m) => ({ ...m, idx: Math.min(rows.length - 1, m.idx + 1) }))
@@ -925,7 +993,7 @@ export function WikiEditor({
         if (e.key === 'Enter' || e.key === 'Tab') {
           e.preventDefault()
           const r = rows[slashMenu.idx]
-          if (r) runSlash(r.type)
+          if (r) runSlash(r)
           return
         }
         if (e.key === 'Escape') {
@@ -1039,13 +1107,27 @@ export function WikiEditor({
   }, [md])
 
   const linkRowsRender = linkMenu.open ? linkRows(linkMenu.q) : []
-  const slashRowsRender = slashMenu.open ? slashRows(slashMenu.q) : []
+  const slashRowsRender = slashMenu.open ? slashRows(slashMenu.q, canAttachRef.current) : []
 
   return (
     <div
       ref={hostRef}
+      onDrop={onDrop}
+      onDragOver={onDragOver}
+      onDragLeave={onDragLeave}
       style={sx('flex:1;min-width:0;min-height:0;display:flex;position:relative;')}
     >
+      {dragOver && (
+        <div
+          style={sx(
+            'position:absolute;inset:8px;z-index:60;display:flex;align-items:center;justify-content:center;border:2px dashed var(--accent);border-radius:14px;background:var(--accent-soft);pointer-events:none;',
+          )}
+        >
+          <span style={sx("font:600 15px 'IBM Plex Sans';color:var(--accent-ink);")}>
+            📎 Drop to attach
+          </span>
+        </div>
+      )}
       <div
         ref={paneRef}
         className="scroll"
@@ -1063,8 +1145,6 @@ export function WikiEditor({
             onKeyDown={onKeyDown}
             onClick={onClick}
             onPaste={onPaste}
-            onDrop={onDrop}
-            onDragOver={onDragOver}
             onBlur={() => void autosave.flush()}
             onMouseUp={() => setTimeout(checkSelection, 0)}
             onMouseOver={onOver}
@@ -1212,14 +1292,14 @@ export function WikiEditor({
               "font:500 10px 'IBM Plex Mono';letter-spacing:.08em;text-transform:uppercase;color:var(--muted);padding:8px 12px 6px;",
             )}
           >
-            Insert block
+            Insert
           </div>
           {slashRowsRender.map((r, i) => (
             <div
-              key={r.type}
+              key={r.type ?? r.action}
               onMouseDown={(e) => {
                 e.preventDefault()
-                runSlash(r.type)
+                runSlash(r)
               }}
               onMouseEnter={() => setSlashMenu((m) => ({ ...m, idx: i }))}
               style={sx(
@@ -1356,16 +1436,50 @@ export function WikiEditor({
         <ConfirmDialog
           heading="Remove embed"
           message={
-            pendingEmbedRemove.kind === 'file'
-              ? `Remove the “${pendingEmbedRemove.title}” attachment from this page? Only this reference is removed — the uploaded file stays in the bucket.`
-              : `Remove the embedded “${pendingEmbedRemove.title}” table from this page? Only this reference is removed — the datatable itself is kept.`
+            pendingEmbedRemove.kind !== 'file'
+              ? `Remove the “${pendingEmbedRemove.title}” table from this page? Only this reference is removed — the datatable itself is kept.`
+              : fileOtherRefs && fileOtherRefs > 0
+                ? `Remove the “${pendingEmbedRemove.title}” attachment from this page? The uploaded file stays in the bucket — it's used on ${fileOtherRefs} other page${fileOtherRefs === 1 ? '' : 's'}.`
+                : `Remove the “${pendingEmbedRemove.title}” attachment from this page?`
           }
-          confirmLabel="Remove embed"
-          onConfirm={() => {
-            pendingEmbedRemove.node.remove()
+          confirmLabel={alsoDeleteFile ? 'Remove & delete file' : 'Remove embed'}
+          extra={
+            pendingEmbedRemove.kind === 'file' && fileOtherRefs === 0 ? (
+              <label
+                style={sx(
+                  "display:flex;align-items:flex-start;gap:8px;cursor:pointer;font:400 12.5px/1.5 'IBM Plex Sans';color:var(--ink-soft);",
+                )}
+              >
+                <input
+                  type="checkbox"
+                  checked={alsoDeleteFile}
+                  onChange={(e) => setAlsoDeleteFile(e.target.checked)}
+                  style={sx('margin-top:2px;cursor:pointer;')}
+                />
+                <span>
+                  Also permanently delete this file from the bucket — it isn't used on any other
+                  page.
+                </span>
+              </label>
+            ) : undefined
+          }
+          onConfirm={async () => {
+            const { node, fileId } = pendingEmbedRemove
+            const del = alsoDeleteFile
+            node.remove()
             setPendingEmbedRemove(null)
             persist()
-            void autosave.flush()
+            await autosave.flush()
+            if (del && fileId) {
+              try {
+                await filesApi.remove(fileId)
+                app.toast('Attachment removed and file deleted')
+              } catch (e) {
+                app.toast(
+                  e instanceof Error ? `File delete failed: ${e.message}` : 'File delete failed',
+                )
+              }
+            }
           }}
           onCancel={() => setPendingEmbedRemove(null)}
         />
@@ -1411,9 +1525,15 @@ function SaveBadge({ status }: { status: SaveStatus }) {
   )
 }
 
-function slashRows(q: string) {
+/** Opens the native file picker (paste/drop's slash-menu equivalent). */
+const ATTACH_ROW: SlashItem = { label: 'Attach file', hint: '📎', action: 'attach' }
+
+function slashRows(q: string, canAttach: boolean): SlashItem[] {
   const ql = q.toLowerCase()
-  return SLASH_ITEMS.filter((x) => !ql || x.label.toLowerCase().includes(ql) || x.type.includes(ql))
+  const items = canAttach ? [...SLASH_ITEMS, ATTACH_ROW] : SLASH_ITEMS
+  return items.filter(
+    (x) => !ql || x.label.toLowerCase().includes(ql) || (x.type ?? x.action ?? '').includes(ql),
+  )
 }
 
 function emptyFmt(): Fmt {

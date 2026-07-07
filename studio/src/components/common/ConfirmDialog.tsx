@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { type ReactNode, useEffect, useState } from 'react'
 import { Hov, sx } from '../../lib/dc'
 
 interface Props {
@@ -10,6 +10,8 @@ interface Props {
   confirmLabel?: string
   /** When true the confirm button is styled destructive (red). */
   destructive?: boolean
+  /** Optional extra content (e.g. a checkbox) rendered between the message and buttons. */
+  extra?: ReactNode
   onConfirm: () => void | Promise<void>
   onCancel: () => void
 }
@@ -25,6 +27,7 @@ export function ConfirmDialog({
   message,
   confirmLabel = 'Confirm',
   destructive = true,
+  extra,
   onConfirm,
   onCancel,
 }: Props) {
@@ -71,6 +74,7 @@ export function ConfirmDialog({
         >
           {message}
         </div>
+        {extra && <div style={sx('margin:-8px 0 18px;')}>{extra}</div>}
         <div style={sx('display:flex;justify-content:flex-end;gap:8px;')}>
           <Hov
             as="button"

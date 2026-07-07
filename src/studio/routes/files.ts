@@ -2,6 +2,7 @@ import { Hono } from 'hono'
 import { z } from 'zod'
 import {
   deleteFile,
+  fileReferences,
   getFile,
   listFiles,
   presignFileUrl,
@@ -96,6 +97,14 @@ export function filesRoutes(provider: StoreProvider, factory: StoreFactory = cre
     const meta = await getFile(provider.db(), c.req.param('id'))
     if (!meta) return c.json({ error: 'not found' }, 404)
     return c.json(meta)
+  })
+
+  // Live pages that reference this file (either embed syntax). Used by the UI to decide
+  // whether removing an embed can also offer to delete the underlying blob. Note: does
+  // NOT scan page metadata/properties, soft-deleted pages, or history (see fileReferences).
+  app.get('/:id/references', async (c) => {
+    const references = await fileReferences(provider.db(), c.req.param('id'))
+    return c.json({ references })
   })
 
   app.delete('/:id', async (c) => {

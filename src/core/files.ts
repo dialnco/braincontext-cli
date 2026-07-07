@@ -83,6 +83,13 @@ const MIME_BY_EXT: Record<string, string> = {
   zip: 'application/zip',
   mp4: 'video/mp4',
   mp3: 'audio/mpeg',
+  // Office (OpenXML + legacy) — otherwise CLI uploads (which pass no MIME) store octet-stream.
+  docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  xlsx: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  pptx: 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+  doc: 'application/msword',
+  xls: 'application/vnd.ms-excel',
+  ppt: 'application/vnd.ms-powerpoint',
 }
 
 export function mimeFor(filename: string): string {

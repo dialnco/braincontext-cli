@@ -44,6 +44,10 @@ export const filesApi = {
   },
   list: () => api.get<FileMeta[]>('/files'),
   meta: (id: string) => api.get<FileMeta>(`/files/${encodeURIComponent(id)}`),
+  references: (id: string) =>
+    api.get<{ references: { id: string; title: string | null }[] }>(
+      `/files/${encodeURIComponent(id)}/references`,
+    ),
   remove: (id: string) => api.del<{ ok: boolean }>(`/files/${encodeURIComponent(id)}`),
 }
 
