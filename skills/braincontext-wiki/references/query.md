@@ -8,7 +8,11 @@ Goal: answer a question from the wiki — and make the answer **compound**.
    bctx wiki search "<q>"     # FTS5/BM25 ranked pages
    ```
 2. **Drill in**: `bctx wiki show "<title>"` to read a page plus its links and
-   backlinks; follow links to gather connected context.
+   backlinks. Then gather the connected context in one shot with
+   `bctx wiki related "<title>" --depth 2` (nearest pages first, with the link
+   type and direction that reached each) instead of following links one by one.
+   When the question is "how do X and Y relate?", `bctx wiki path "X" "Y"`
+   returns the shortest chain of typed links connecting them.
 3. **Synthesize** the answer for the user, **with citations** — name the pages/sources
    you drew on (and `[[link]]` them) so the answer is traceable.
 4. **File it back** as a permanent page so the exploration isn't lost to chat:

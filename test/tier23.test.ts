@@ -13,7 +13,9 @@ import {
   addLink,
   createPage,
   ingestStatus,
+  linkPath,
   recordSource,
+  relatedPages,
   updatePage,
   verifyPage,
   wikiGraph,
@@ -218,6 +220,120 @@ describe('graph pruning', () => {
     expect(core.nodes.length).toBe(1)
     expect(core.nodes[0]!.title).toBe('Hub')
     expect(core.edges).toEqual([]) // spokes pruned → their edges go too
+    await db.destroy()
+  })
+
+  it('the studio /graph route honors minDegree and limit', async () => {
+    const db = await freshDb()
+    const staticDir = mkdtempSync(join(tmpdir(), 'bctx-studio-'))
+    writeFileSync(join(staticDir, 'index.html'), '<!doctype html>ok')
+    const app = buildStudioApp(staticProvider(db), { staticDir })
+
+    const hub = await createPage(db, { title: 'Hub', pageType: 'concept', body: '' })
+    const spoke = await createPage(db, { title: 'Spoke', pageType: 'concept', body: '' })
+    await addLink(db, spoke.id, { toId: hub.id, type: 'relates' })
+    await createPage(db, { title: 'Isolated', pageType: 'concept', body: '' })
+
+    const all = (await (await app.request('/api/wiki/graph')).json()) as any
+    expect(all.nodes.length).toBe(3)
+    const connected = (await (await app.request('/api/wiki/graph?minDegree=1')).json()) as any
+    expect(connected.nodes.length).toBe(2)
+    const core = (await (await app.request('/api/wiki/graph?limit=1')).json()) as any
+    expect(core.nodes.length).toBe(1)
+    await db.destroy()
+  })
+})
+
+describe('graph traversal (related + path)', () => {
+  /** Hub -[references]-> Spoke, Spoke -[relates]-> Deep, Inbound -[mentions]-> Hub, Island. */
+  async function seed(db: Kysely<Database>) {
+    const hub = await createPage(db, { title: 'Hub', pageType: 'concept', body: '' })
+    const spoke = await createPage(db, { title: 'Spoke', pageType: 'concept', body: '' })
+    const deep = await createPage(db, { title: 'Deep', pageType: 'analysis', body: '' })
+    const inbound = await createPage(db, { title: 'Inbound', pageType: 'concept', body: '' })
+    const island = await createPage(db, { title: 'Island', pageType: 'concept', body: '' })
+    await addLink(db, hub.id, { toId: spoke.id, type: 'relates' })
+    await addLink(db, spoke.id, { toId: deep.id, type: 'part-of' })
+    await addLink(db, inbound.id, { toId: hub.id, type: 'mentions' })
+    return { hub, spoke, deep, inbound, island }
+  }
+
+  it('relatedPages walks both directions, breadth-first, with via attribution', async () => {
+    const db = await freshDb()
+    const { hub, spoke, deep, inbound } = await seed(db)
+
+    const one = (await relatedPages(db, hub.id))!
+    expect(one.map((r) => r.title).sort()).toEqual(['Inbound', 'Spoke'])
+    expect(one.find((r) => r.id === spoke.id)!.via).toMatchObject({
+      from: hub.id,
+      type: 'relates',
+      direction: 'out',
+    })
+    expect(one.find((r) => r.id === inbound.id)!.via.direction).toBe('in')
+
+    const two = (await relatedPages(db, hub.id, { depth: 2 }))!
+    const deepHit = two.find((r) => r.id === deep.id)!
+    expect(deepHit.distance).toBe(2)
+    expect(deepHit.via).toMatchObject({ from: spoke.id, fromTitle: 'Spoke', type: 'part-of' })
+    // Nearer pages come first.
+    expect(two.map((r) => r.distance)).toEqual([...two.map((r) => r.distance)].sort())
+    await db.destroy()
+  })
+
+  it('relatedPages honors types, limit, and missing pages', async () => {
+    const db = await freshDb()
+    const { hub, spoke } = await seed(db)
+    const onlyRelates = (await relatedPages(db, hub.id, { depth: 2, types: ['relates'] }))!
+    expect(onlyRelates.map((r) => r.id)).toEqual([spoke.id])
+    expect((await relatedPages(db, hub.id, { depth: 2, limit: 1 }))!.length).toBe(1)
+    expect(await relatedPages(db, 'nope')).toBeNull()
+    await db.destroy()
+  })
+
+  it('linkPath finds the shortest chain with per-step direction', async () => {
+    const db = await freshDb()
+    const { hub, deep, island } = await seed(db)
+
+    const path = (await linkPath(db, deep.id, hub.id))!
+    expect(path.found).toBe(true)
+    expect(path.hops).toBe(2)
+    expect(path.steps.map((s) => s.title)).toEqual(['Deep', 'Spoke', 'Hub'])
+    // Both links point AWAY from hub-side, so walking Deep→Hub goes against them.
+    expect(path.steps[1]!.via).toMatchObject({ type: 'part-of', direction: 'in' })
+    expect(path.steps[2]!.via).toMatchObject({ type: 'relates', direction: 'in' })
+
+    const same = (await linkPath(db, hub.id, hub.id))!
+    expect(same).toMatchObject({ found: true, hops: 0 })
+
+    const none = (await linkPath(db, island.id, hub.id))!
+    expect(none.found).toBe(false)
+
+    expect(await linkPath(db, hub.id, 'nope')).toBeNull()
+    await db.destroy()
+  })
+
+  it('is exposed over MCP as wiki_related and wiki_path', async () => {
+    const db = await freshDb()
+    const { hub, deep } = await seed(db)
+    const client = await connectMcp(db)
+
+    const related = payload(
+      await client.callTool({ name: 'wiki_related', arguments: { ref: 'Hub', depth: 2 } }),
+    )
+    expect(related.center.id).toBe(hub.id)
+    expect(related.count).toBe(3)
+    expect(related.related.some((r: any) => r.id === deep.id && r.distance === 2)).toBe(true)
+
+    const path = payload(
+      await client.callTool({ name: 'wiki_path', arguments: { from: 'Deep', to: 'Hub' } }),
+    )
+    expect(path.found).toBe(true)
+    expect(path.hops).toBe(2)
+
+    const none = payload(
+      await client.callTool({ name: 'wiki_path', arguments: { from: 'Island', to: 'Hub' } }),
+    )
+    expect(none.found).toBe(false)
     await db.destroy()
   })
 })

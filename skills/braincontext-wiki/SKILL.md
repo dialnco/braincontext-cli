@@ -47,6 +47,24 @@ you don't get bored, so it's **yours**.
   `references` edge automatically; an unknown `[[Title]]` becomes a **wanted** (red) link that `lint` surfaces.
 - For explicit semantic edges use `bctx wiki link <from> <to> --type <relates|supersedes|part-of|mentions|source>`.
 
+## Navigate the graph (query it, don't just build it)
+
+The link graph is queryable — use it to assemble context around a page instead of
+re-searching, and to explain how concepts relate:
+
+- `bctx wiki related "<ref>" [--depth N] [--type a,b] [--limit N]` (MCP: `wiki_related`) —
+  every page within N hops, nearest first, each hit tagged with the link type, its true
+  direction (`→` outbound / `←` inbound), and the page it was reached through. **Start
+  here when a task centers on one page**: 1 hop = its immediate context, 2 hops = the
+  wider neighborhood worth peeking.
+- `bctx wiki path "<from>" "<to>"` (MCP: `wiki_path`) — the shortest chain of links
+  connecting two pages, with the type + direction of every step. Answers "how do these
+  two concepts relate?" structurally; exits non-zero when they don't connect.
+- `bctx wiki graph [--min-degree N] [--limit N]` (MCP: `wiki_graph`) — whole-graph
+  overview: counts by link type, orphans, and the best-connected hubs. Hubs are the
+  load-bearing pages — keep them accurate first. On large wikis pass `--limit` for the
+  well-connected core instead of thousands of nodes.
+
 ## Editing tables (cell/row ops — don't rewrite the whole body)
 
 Editing a markdown table the naive way (fetch the full body, re-emit the whole table, PATCH
@@ -165,6 +183,9 @@ bctx wiki get "<ref>" --peek              # outline/excerpt/links/cost — decid
 bctx wiki verify "<ref>"                  # mark just-checked content as verified
 bctx wiki link "<from>" "<to>" --type <relates|supersedes|part-of|mentions|source>
 bctx wiki backlinks "<id|title>"
+bctx wiki related "<ref>" [--depth N]     # neighborhood: pages within N hops, nearest first
+bctx wiki path "<from>" "<to>"            # shortest link chain between two pages
+bctx wiki graph [--limit N]               # overview: link counts, orphans, best-connected hubs
 bctx wiki search "<q>" [--type][--limit]
 bctx wiki index [--out index.md] [--budget N]  # catalog by page type; --budget caps it at ~N tokens
 bctx wiki log [--tail N]                  # operation log

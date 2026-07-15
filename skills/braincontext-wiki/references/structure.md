@@ -16,6 +16,8 @@
 - `[[Title]]` in a body → an automatic `references` edge (re-derived on every save).
 - Explicit edges (`bctx wiki link ... --type ...`) are preserved across edits.
 - A page's **backlinks** (`bctx wiki backlinks`) are how you navigate inbound context.
+- The graph is **queryable**: `bctx wiki related` (N-hop neighborhood), `bctx wiki path`
+  (shortest chain between two pages), `bctx wiki graph` (overview: hubs, orphans, counts).
 
 ## Conventions
 

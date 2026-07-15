@@ -308,7 +308,13 @@ export function wikiRoutes(provider: StoreProvider): Hono {
   })
 
   app.get('/graph', async (c) =>
-    c.json(await wikiGraph(provider.db(), { namespace: strQuery(c, 'namespace') })),
+    c.json(
+      await wikiGraph(provider.db(), {
+        namespace: strQuery(c, 'namespace'),
+        minDegree: intQuery(c, 'minDegree'),
+        limit: intQuery(c, 'limit'),
+      }),
+    ),
   )
 
   // --- resolution + log ---

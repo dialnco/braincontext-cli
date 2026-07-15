@@ -20,6 +20,7 @@ import { DataTableEditor, type DataTableHandle } from '../editor/DataTableEditor
 import { WikiEditor, type WikiEditorHandle } from '../editor/WikiEditor'
 import { Hov, sx } from '../lib/dc'
 import { freshnessColor, pageFreshness } from '../lib/freshness'
+import { GRAPH_NODE_CAP } from '../lib/graph'
 import { pageHref, useRoute } from '../state/router'
 import { useApp } from '../state/StoreContext'
 import { useAsync } from '../state/useAsync'
@@ -86,8 +87,13 @@ export function WikiView({ onNav }: { onNav: (v: 'wiki' | 'contexts' | 'settings
     return { page, links, backlinks, history }
   }, [activeId, app.rev, localRev])
 
+  // Cap the graph at the best-connected core so the O(n²) layout stays smooth on
+  // big wikis; below the cap this returns everything (GraphOverlay notes the prune).
   const graphState = useAsync<WikiGraph>(
-    () => (graphOpen ? wikiApi.graph() : Promise.resolve({ nodes: [], edges: [] })),
+    () =>
+      graphOpen
+        ? wikiApi.graph({ limit: GRAPH_NODE_CAP })
+        : Promise.resolve({ nodes: [], edges: [] }),
     [graphOpen, app.rev, localRev],
   )
 

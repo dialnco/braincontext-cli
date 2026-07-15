@@ -731,6 +731,165 @@ export async function wikiGraph(
 }
 
 // ---------------------------------------------------------------------------
+// Graph traversal (queryable graph: neighborhoods and paths, not just a dump)
+// ---------------------------------------------------------------------------
+
+/** One traversable edge as seen from a node: `direction` is 'out' when the link
+ *  points away from that node (node → other), 'in' when it points at it. */
+interface Neighbor {
+  other: string
+  type: string
+  direction: 'out' | 'in'
+}
+
+/** Load the live-page link graph once (same live-endpoints rule as {@link wikiGraph}). */
+async function loadLinkGraph(
+  db: Kysely<Database>,
+  opts: { namespace?: string } = {},
+): Promise<{ byId: Map<string, Context>; adj: Map<string, Neighbor[]> }> {
+  const pages = await listPages(db, { namespace: opts.namespace, limit: 5000 })
+  const byId = new Map(pages.map((p) => [p.id, p]))
+  const rows = await db
+    .selectFrom('links')
+    .select(['from_id as from', 'to_id as to', 'type'])
+    .where('to_id', 'is not', null)
+    .execute()
+  const adj = new Map<string, Neighbor[]>()
+  const push = (id: string, n: Neighbor) => {
+    const arr = adj.get(id) ?? []
+    arr.push(n)
+    adj.set(id, arr)
+  }
+  for (const r of rows) {
+    if (!r.to || r.to === r.from || !byId.has(r.from) || !byId.has(r.to)) continue
+    push(r.from, { other: r.to, type: r.type, direction: 'out' })
+    push(r.to, { other: r.from, type: r.type, direction: 'in' })
+  }
+  return { byId, adj }
+}
+
+export interface RelatedPage {
+  id: string
+  title: string | null
+  pageType: string | null
+  /** Hops from the start page (1 = directly linked). */
+  distance: number
+  /** The link that first reached this page: `direction` is relative to `from`. */
+  via: { from: string; fromTitle: string | null; type: string; direction: 'out' | 'in' }
+}
+
+/**
+ * The pages reachable from `id` within `depth` hops of the resolved link graph
+ * (links traversed in both directions), breadth-first so nearer pages come first.
+ * `types` restricts which link types are traversed; `limit` caps the result.
+ * Returns null when `id` is not a live page.
+ */
+export async function relatedPages(
+  db: Kysely<Database>,
+  id: string,
+  opts: { depth?: number; types?: string[]; limit?: number; namespace?: string } = {},
+): Promise<RelatedPage[] | null> {
+  const depth = opts.depth ?? 1
+  const { byId, adj } = await loadLinkGraph(db, { namespace: opts.namespace })
+  if (!byId.has(id)) return null
+  const allowed = opts.types && opts.types.length > 0 ? new Set(opts.types) : null
+  const out: RelatedPage[] = []
+  const visited = new Set([id])
+  let frontier = [id]
+  for (let d = 1; d <= depth && frontier.length > 0; d++) {
+    const next: string[] = []
+    for (const cur of frontier) {
+      for (const n of adj.get(cur) ?? []) {
+        if (visited.has(n.other) || (allowed && !allowed.has(n.type))) continue
+        visited.add(n.other)
+        const page = byId.get(n.other)
+        if (!page) continue
+        out.push({
+          id: n.other,
+          title: page.title,
+          pageType: page.pageType,
+          distance: d,
+          via: {
+            from: cur,
+            fromTitle: byId.get(cur)?.title ?? null,
+            type: n.type,
+            direction: n.direction,
+          },
+        })
+        if (opts.limit !== undefined && out.length >= opts.limit) return out
+        next.push(n.other)
+      }
+    }
+    frontier = next
+  }
+  return out
+}
+
+export interface PathStep {
+  id: string
+  title: string | null
+  pageType: string | null
+  /** The link from the PREVIOUS step to this one (absent on the first step). */
+  via?: { type: string; direction: 'out' | 'in' }
+}
+
+export interface LinkPath {
+  found: boolean
+  /** Edge count when found (0 when from === to). */
+  hops: number
+  steps: PathStep[]
+}
+
+/**
+ * Shortest chain of links connecting two live pages (links traversed in both
+ * directions; each step's `via` tells the type and true direction). Returns
+ * `{found:false}` when no chain exists within `maxHops`, and null when either
+ * endpoint is not a live page.
+ */
+export async function linkPath(
+  db: Kysely<Database>,
+  fromId: string,
+  toId: string,
+  opts: { maxHops?: number } = {},
+): Promise<LinkPath | null> {
+  const { byId, adj } = await loadLinkGraph(db)
+  if (!byId.has(fromId) || !byId.has(toId)) return null
+  const step = (pid: string, via?: PathStep['via']): PathStep => {
+    const p = byId.get(pid)
+    return { id: pid, title: p?.title ?? null, pageType: p?.pageType ?? null, ...(via && { via }) }
+  }
+  if (fromId === toId) return { found: true, hops: 0, steps: [step(fromId)] }
+  const maxHops = opts.maxHops ?? 10
+  const prev = new Map<string, { from: string; type: string; direction: 'out' | 'in' }>()
+  const seen = new Set([fromId])
+  let frontier = [fromId]
+  for (let d = 1; d <= maxHops && frontier.length > 0; d++) {
+    const next: string[] = []
+    for (const cur of frontier) {
+      for (const n of adj.get(cur) ?? []) {
+        if (seen.has(n.other)) continue
+        seen.add(n.other)
+        prev.set(n.other, { from: cur, type: n.type, direction: n.direction })
+        if (n.other === toId) {
+          const steps: PathStep[] = []
+          for (let at = toId; at !== fromId; ) {
+            const e = prev.get(at)
+            if (!e) break
+            steps.unshift(step(at, { type: e.type, direction: e.direction }))
+            at = e.from
+          }
+          steps.unshift(step(fromId))
+          return { found: true, hops: steps.length - 1, steps }
+        }
+        next.push(n.other)
+      }
+    }
+    frontier = next
+  }
+  return { found: false, hops: 0, steps: [] }
+}
+
+// ---------------------------------------------------------------------------
 // Ingest status (resumable synthesis: derive checklist completion from the graph)
 // ---------------------------------------------------------------------------
 

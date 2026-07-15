@@ -41,6 +41,10 @@ export interface RenderNode {
 const W = 900
 const H = 600
 
+/** Max nodes the overlay requests (`limit` = keep the best-connected core) — the
+ *  force layout is O(n²) on the main thread, so big wikis get pruned server-side. */
+export const GRAPH_NODE_CAP = 400
+
 /** Collapse directed edges to a unique undirected set among the given node ids. */
 export function undirectedEdges(edges: GraphEdge[], ids: Set<string>): [string, string][] {
   const seen = new Set<string>()

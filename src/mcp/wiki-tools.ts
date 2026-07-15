@@ -15,7 +15,13 @@ import {
   tableRenameColumn,
   tableSetCell,
 } from '../core/tables'
-import { AUTHORED_PAGE_TYPES, type Database, LINK_TYPES } from '../core/types'
+import {
+  AUTHORED_PAGE_TYPES,
+  type Database,
+  EMBEDS_LINK,
+  LINK_TYPES,
+  REFERENCES_LINK,
+} from '../core/types'
 import {
   addLink,
   appendLog,
@@ -24,12 +30,14 @@ import {
   createView,
   getPage,
   ingestStatus,
+  linkPath,
   lint,
   listPages,
   outboundLinks,
   pageFreshness,
   pagePeek,
   recordSource,
+  relatedPages,
   removeLink,
   resolvePageRef,
   searchPages,
@@ -671,7 +679,7 @@ export function registerWikiTools(server: McpServer, db: Kysely<Database>): void
     {
       title: 'Wiki graph',
       description:
-        'Return the wiki link graph — pages (nodes, with degree) and their typed edges — for navigation and overview. Optionally scope to a namespace; on large wikis use minDegree/limit to get the well-connected core instead of thousands of nodes.',
+        'Return the wiki link graph — pages (nodes, with degree) and their typed edges — for navigation and overview. Optionally scope to a namespace; on large wikis use minDegree/limit to get the well-connected core instead of thousands of nodes. For the neighborhood of ONE page use wiki_related; for how two pages connect use wiki_path — both are much cheaper than the full graph.',
       inputSchema: {
         namespace: z.string().optional(),
         minDegree: z
@@ -690,6 +698,59 @@ export function registerWikiTools(server: McpServer, db: Kysely<Database>): void
     },
     async ({ namespace, minDegree, limit }) =>
       ok(await wikiGraph(db, { namespace, minDegree, limit })),
+  )
+
+  server.registerTool(
+    'wiki_related',
+    {
+      title: 'Related pages',
+      description:
+        'The pages reachable within `depth` hops of a page in the link graph (links traversed in both directions), nearest first. Each hit says which link first reached it (type + direction + the page it came through). Cheaper and more precise than wiki_graph when you want the neighborhood of ONE page — use it to assemble context around the page you are working from.',
+      inputSchema: {
+        ref: z.string().describe('page id, slug, or title'),
+        depth: z.number().int().positive().max(5).default(1).describe('hops to traverse'),
+        types: z
+          .array(z.enum([...LINK_TYPES, REFERENCES_LINK, EMBEDS_LINK]))
+          .optional()
+          .describe('only traverse these link types (default: all)'),
+        limit: z.number().int().positive().optional().describe('max pages returned'),
+      },
+    },
+    async ({ ref, depth, types, limit }) => {
+      const page = await resolveRef(db, ref)
+      if (!page) return fail(`No wiki page matching "${ref}"`)
+      const related = await relatedPages(db, page.id, { depth, types, limit })
+      if (!related) return fail(`No wiki page matching "${ref}"`)
+      return ok({ center: { id: page.id, title: page.title }, count: related.length, related })
+    },
+  )
+
+  server.registerTool(
+    'wiki_path',
+    {
+      title: 'Path between pages',
+      description:
+        'The shortest chain of links connecting two pages (links traversed in both directions). Each step reports the link type and its true direction — use it to see HOW two concepts relate, not just whether they do. Returns found:false when no chain exists within maxHops.',
+      inputSchema: {
+        from: z.string().describe('start page id, slug, or title'),
+        to: z.string().describe('end page id, slug, or title'),
+        maxHops: z
+          .number()
+          .int()
+          .positive()
+          .optional()
+          .describe('give up beyond this many hops (default 10)'),
+      },
+    },
+    async ({ from, to, maxHops }) => {
+      const f = await resolveRef(db, from)
+      if (!f) return fail(`No wiki page matching "${from}"`)
+      const t = await resolveRef(db, to)
+      if (!t) return fail(`No wiki page matching "${to}"`)
+      const path = await linkPath(db, f.id, t.id, { maxHops })
+      if (!path) return fail('Both endpoints must be live wiki pages')
+      return ok(path)
+    },
   )
 
   // --- table cell/row ops (edit a GFM table in a page body without rewriting it) ----------

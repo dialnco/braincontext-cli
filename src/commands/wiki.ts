@@ -33,6 +33,7 @@ import {
   createPage,
   createView,
   ingestStatus,
+  linkPath,
   lint,
   listLog,
   listPages,
@@ -41,12 +42,14 @@ import {
   pagePeek,
   recordSource,
   reindexWiki,
+  relatedPages,
   removeLink,
   resolvePageRef,
   searchPages,
   setPageProps,
   updatePage,
   verifyPage,
+  wikiGraph,
 } from '../core/wiki'
 import { resolveAgent } from '../lib/agent'
 import { formatList } from '../lib/format'
@@ -91,7 +94,7 @@ function printPage(
 
 export function wikiCommand(): Command {
   const wiki = new Command('wiki').description(
-    'Preferred workflow. Build & maintain a linked knowledge wiki (Karpathy LLM-wiki) over the store: pages, typed links, ingest, lint.',
+    'Preferred workflow. Build & maintain a linked knowledge wiki (Karpathy LLM-wiki) over the store: pages, typed links, ingest, lint — and query the graph (related/path/graph).',
   )
 
   wiki
@@ -487,6 +490,142 @@ export function wikiCommand(): Command {
         else if (back.length === 0) console.log('No backlinks.')
         else for (const l of back) console.log(`[${l.type}] ${l.title} (${l.pageId})`)
       })
+    })
+
+  wiki
+    .command('related <ref>')
+    .description(
+      'Pages reachable within N hops of the link graph (both directions), nearest first.',
+    )
+    .option('--depth <n>', 'how many hops to traverse', '1')
+    .option('--type <a,b,c>', 'only traverse these link types')
+    .option('--limit <n>', 'max pages returned')
+    .option('--json', 'output JSON')
+    .action(async (ref: string, opts, command: Command) => {
+      await withDb(dbOptsFrom(command), async (db) => {
+        const page = await resolvePageRef(db, ref)
+        if (!page) {
+          console.error(`No wiki page matching "${ref}".`)
+          process.exitCode = 1
+          return
+        }
+        const depth = parsePositiveInt(opts.depth, '--depth') ?? 1
+        const related = await relatedPages(db, page.id, {
+          depth,
+          types: splitCsv(opts.type),
+          limit: parsePositiveInt(opts.limit, '--limit'),
+        })
+        if (!related) {
+          console.error(`No wiki page matching "${ref}".`)
+          process.exitCode = 1
+          return
+        }
+        if (opts.json) {
+          console.log(JSON.stringify(related, null, 2))
+          return
+        }
+        if (related.length === 0) {
+          console.log(`No pages linked to "${page.title}" within ${depth} hop(s).`)
+          return
+        }
+        console.log(`Related to "${page.title}" (${related.length} page(s)):`)
+        let ring = 0
+        for (const r of related) {
+          if (r.distance !== ring) {
+            ring = r.distance
+            console.log(`  ${ring} hop(s):`)
+          }
+          const arrow = r.via.direction === 'out' ? '→' : '←'
+          const via = r.distance > 1 ? `  via ${r.via.fromTitle ?? r.via.from}` : ''
+          console.log(`    ${arrow} [${r.via.type}] ${r.title ?? r.id} (${r.id})${via}`)
+        }
+      })
+    })
+
+  wiki
+    .command('path <from> <to>')
+    .description('Shortest chain of links connecting two pages (traversed in both directions).')
+    .option('--max-hops <n>', 'give up beyond this many hops (default 10)')
+    .option('--json', 'output JSON')
+    .action(async (fromRef: string, toRef: string, opts, command: Command) => {
+      await withDb(dbOptsFrom(command), async (db) => {
+        const from = await resolvePageRef(db, fromRef)
+        const to = await resolvePageRef(db, toRef)
+        if (!from || !to) {
+          console.error(`No wiki page matching "${from ? toRef : fromRef}".`)
+          process.exitCode = 1
+          return
+        }
+        const path = await linkPath(db, from.id, to.id, {
+          maxHops: parsePositiveInt(opts.maxHops, '--max-hops'),
+        })
+        if (opts.json) {
+          console.log(JSON.stringify(path, null, 2))
+          if (!path?.found) process.exitCode = 1
+          return
+        }
+        if (!path?.found) {
+          console.log(`No link path between "${from.title}" and "${to.title}".`)
+          process.exitCode = 1
+          return
+        }
+        const chain = path.steps
+          .map((s, i) => {
+            const name = s.title ?? s.id
+            if (i === 0 || !s.via) return name
+            return s.via.direction === 'out'
+              ? `-[${s.via.type}]→ ${name}`
+              : `←[${s.via.type}]- ${name}`
+          })
+          .join(' ')
+        console.log(chain)
+        console.log(`${path.steps.length} page(s), ${path.hops} hop(s).`)
+      })
+    })
+
+  wiki
+    .command('graph')
+    .description(
+      'Overview of the link graph: node/edge counts and the best-connected pages (hubs). --json returns the full graph (nodes with degree + typed edges).',
+    )
+    .option('--namespace <ns>', 'restrict to a namespace')
+    .option('--min-degree <n>', 'drop pages with fewer connections than this')
+    .option('--limit <n>', 'keep only the N best-connected pages')
+    .option('--json', 'output JSON')
+    .action(async (opts, command: Command) => {
+      let minDegree: number | undefined
+      if (opts.minDegree !== undefined) {
+        minDegree = Number(opts.minDegree)
+        if (!Number.isInteger(minDegree) || minDegree < 0) {
+          throw new Error('--min-degree must be a non-negative integer')
+        }
+      }
+      const graph = await withDb(dbOptsFrom(command), (db) =>
+        wikiGraph(db, {
+          namespace: opts.namespace,
+          minDegree,
+          limit: parsePositiveInt(opts.limit, '--limit'),
+        }),
+      )
+      if (opts.json) {
+        console.log(JSON.stringify(graph, null, 2))
+        return
+      }
+      const byType = new Map<string, number>()
+      for (const e of graph.edges) byType.set(e.type, (byType.get(e.type) ?? 0) + 1)
+      const types = [...byType.entries()].map(([t, n]) => `${t} ${n}`).join(', ')
+      const orphans = graph.nodes.filter((n) => n.degree === 0).length
+      console.log(
+        `${graph.nodes.length} page(s) · ${graph.edges.length} link(s)${types ? ` (${types})` : ''}${orphans > 0 ? ` · ${orphans} orphan(s)` : ''}`,
+      )
+      const hubs = [...graph.nodes].sort((a, b) => b.degree - a.degree).slice(0, 15)
+      if (hubs.length > 0 && (hubs[0]?.degree ?? 0) > 0) {
+        console.log('Best connected:')
+        for (const n of hubs) {
+          if (n.degree === 0) break
+          console.log(`  ${String(n.degree).padStart(3)}  ${n.title ?? n.id}  [${n.pageType}]`)
+        }
+      }
     })
 
   wiki

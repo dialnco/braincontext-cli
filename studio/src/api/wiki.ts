@@ -92,7 +92,10 @@ export const wikiApi = {
   addLink: (input: LinkInput) => api.post<{ ok: true }>('/wiki/links', input),
   removeLink: (input: { fromId: string; toId?: string; toTitle?: string; type?: LinkType }) =>
     api.del<{ ok: true }>('/wiki/links', input),
-  graph: (namespace?: string) => api.get<WikiGraph>(`/wiki/graph${qs({ namespace })}`),
+  graph: (p: { namespace?: string; minDegree?: number; limit?: number } = {}) =>
+    api.get<WikiGraph>(
+      `/wiki/graph${qs({ namespace: p.namespace, minDegree: p.minDegree, limit: p.limit })}`,
+    ),
   resolve: (title: string) => api.get<Context | null>(`/wiki/resolve${qs({ title })}`),
   log: (tail?: number) => api.get<WikiLogRow[]>(`/wiki/log${qs({ tail })}`),
   lint: (staleDays?: number) => api.get<LintReport>(`/wiki/lint${qs({ staleDays })}`),
