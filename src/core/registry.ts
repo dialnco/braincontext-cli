@@ -124,47 +124,113 @@ export function writeConfig(cfg: Config): void {
 
 // ── Credentials (tokens) live apart from config.json, with 0600 perms ──────────
 
-type Credentials = Record<string, string>
+/**
+ * Per-project secrets. Two distinct things, both bearer credentials:
+ *  - `authToken` — the libSQL token that reaches the remote primary;
+ *  - `accessKey` — this member's bctx key, which decides what they may do
+ *    (see core/access). Absent for projects without access control.
+ */
+export interface ProjectCredentials {
+  authToken?: string
+  accessKey?: string
+}
 
-function readCredentials(): Credentials {
+/** On disk an entry is either the object form or a bare token string (pre-0.9). */
+type StoredCredentials = Record<string, string | ProjectCredentials>
+
+function readCredentials(): Record<string, ProjectCredentials> {
   const p = credentialsPath()
   if (!existsSync(p)) return {}
   try {
     const raw = JSON.parse(readFileSync(p, 'utf8'))
-    return raw && typeof raw === 'object' ? (raw as Credentials) : {}
+    if (!raw || typeof raw !== 'object') return {}
+    const out: Record<string, ProjectCredentials> = {}
+    for (const [name, value] of Object.entries(raw as StoredCredentials)) {
+      // Legacy entries are the token itself; normalize on read so callers see one shape.
+      if (typeof value === 'string') out[name] = { authToken: value }
+      else if (value && typeof value === 'object') {
+        out[name] = {
+          authToken: typeof value.authToken === 'string' ? value.authToken : undefined,
+          accessKey: typeof value.accessKey === 'string' ? value.accessKey : undefined,
+        }
+      }
+    }
+    return out
   } catch {
     return {}
   }
 }
 
-function writeCredentials(creds: Credentials): void {
+function writeCredentials(creds: Record<string, ProjectCredentials>): void {
   ensureHome()
-  atomicWrite(credentialsPath(), `${JSON.stringify(creds, null, 2)}\n`, 0o600)
+  const out: StoredCredentials = {}
+  for (const [name, value] of Object.entries(creds)) {
+    if (!value.authToken && !value.accessKey) continue
+    // Keep the legacy string shape when there is nothing else to store, so a store
+    // that never uses access control stays readable by an older bctx.
+    out[name] = value.accessKey ? value : (value.authToken as string)
+  }
+  atomicWrite(credentialsPath(), `${JSON.stringify(out, null, 2)}\n`, 0o600)
+}
+
+function mutateCredential(name: string, patch: ProjectCredentials): void {
+  const creds = readCredentials()
+  creds[name] = { ...creds[name], ...patch }
+  writeCredentials(creds)
 }
 
 /** Persist (or clear, with `null`) a project's auth token in credentials.json. */
 export function setToken(name: string, token: string | null): void {
+  mutateCredential(name, { authToken: token ?? undefined })
+}
+
+/** Persist (or clear, with `null`) this member's bctx access key for a project. */
+export function setAccessKey(name: string, key: string | null): void {
+  mutateCredential(name, { accessKey: key ?? undefined })
+}
+
+/** Forget every secret held for a project. */
+export function clearCredentials(name: string): void {
   const creds = readCredentials()
-  if (token === null) delete creds[name]
-  else creds[name] = token
+  delete creds[name]
   writeCredentials(creds)
 }
 
 /**
- * Env-var key for a project token, or null when the name can't map unambiguously. Env var
- * names allow only `[A-Z0-9_]`, so a name with `.`/`-` would collapse to `_` and could
- * collide with a *different* project (sending the wrong token to the wrong remote). For
- * those, we expose no env override — credentials.json is keyed by the exact name.
+ * Env-var key for a per-project secret, or null when the name can't map unambiguously.
+ * Env var names allow only `[A-Z0-9_]`, so a name with `.`/`-` would collapse to `_` and
+ * could collide with a *different* project (sending the wrong token to the wrong remote).
+ * For those, we expose no env override — credentials.json is keyed by the exact name.
  */
-function tokenEnvKey(name: string): string | null {
-  return /^[A-Za-z0-9_]+$/.test(name) ? `BCTX_TOKEN_${name.toUpperCase()}` : null
+function envKey(prefix: string, name: string): string | null {
+  return /^[A-Za-z0-9_]+$/.test(name) ? `${prefix}${name.toUpperCase()}` : null
 }
 
 /** Resolve a project's token: `BCTX_TOKEN_<NAME>` env wins, else credentials.json. */
 export function resolveToken(name: string): string | undefined {
-  const key = tokenEnvKey(name)
+  const key = envKey('BCTX_TOKEN_', name)
   const fromEnv = key ? process.env[key] : undefined
-  return fromEnv ?? readCredentials()[name]
+  return fromEnv ?? readCredentials()[name]?.authToken
+}
+
+/**
+ * Resolve this member's access key: `BCTX_KEY_<NAME>` env, then credentials.json,
+ * then the unscoped `BCTX_KEY`.
+ *
+ * The unscoped fallback exists because a `--db <path>` target has no project name
+ * to key on. It is safe to try against the wrong project: a key only verifies
+ * against the store that issued it, so a mismatch fails authentication rather than
+ * granting anything.
+ */
+export function resolveAccessKey(name?: string): string | undefined {
+  if (name) {
+    const key = envKey('BCTX_KEY_', name)
+    const fromEnv = key ? process.env[key] : undefined
+    if (fromEnv) return fromEnv
+    const stored = readCredentials()[name]?.accessKey
+    if (stored) return stored
+  }
+  return process.env.BCTX_KEY || undefined
 }
 
 // ── Project CRUD ───────────────────────────────────────────────────────────────
@@ -243,7 +309,7 @@ export function removeProject(name: string): ProjectEntry {
     delete cfg.projects[name]
     if (cfg.currentProject === name) cfg.currentProject = DEFAULT_PROJECT
   })
-  setToken(name, null)
+  clearCredentials(name)
   // mutateConfig throws above if the project was missing, so `removed` is always set here.
   return removed as ProjectEntry
 }
@@ -258,7 +324,7 @@ export function projectFilePath(entry: ProjectEntry): string {
 export function projectToTarget(name: string, entry: ProjectEntry): DbTarget {
   if (entry.mode === 'remote') {
     if (!entry.syncUrl) throw new Error(`Project "${name}" is remote but has no syncUrl.`)
-    return { mode: 'remote', url: entry.syncUrl, authToken: resolveToken(name) }
+    return { mode: 'remote', url: entry.syncUrl, authToken: resolveToken(name), project: name }
   }
   const file = projectFilePath(entry)
   if (entry.mode === 'replica') {
@@ -269,7 +335,8 @@ export function projectToTarget(name: string, entry: ProjectEntry): DbTarget {
       syncUrl: entry.syncUrl,
       authToken: resolveToken(name),
       syncInterval: entry.syncInterval,
+      project: name,
     }
   }
-  return { mode: 'local', file }
+  return { mode: 'local', file, project: name }
 }

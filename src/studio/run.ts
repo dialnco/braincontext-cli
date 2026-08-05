@@ -2,6 +2,7 @@ import { existsSync } from 'node:fs'
 import { serve } from '@hono/node-server'
 import type { Hono } from 'hono'
 import type { DbOpts } from '../core/paths'
+import { resolveAccessKey } from '../core/registry'
 import { isInteractive } from '../lib/ansi'
 import { openInBrowser } from '../lib/open'
 import { resolveStudioDir } from './assets'
@@ -36,7 +37,11 @@ export async function runStudio(opts: StudioOpts): Promise<void> {
     )
     console.error('  Run `npm run build` first, or use `npm run studio:dev` for HMR development.')
   }
-  const app = buildStudioApp(stores, { staticDir })
+  // Adopt the key this machine already holds for the served project, so the person
+  // who launched Studio is signed in as the identity their CLI uses rather than
+  // being asked to paste a key into their own browser.
+  const localKey = resolveAccessKey(stores.status().project ?? undefined)
+  const app = buildStudioApp(stores, { staticDir, localKey })
 
   let closing = false
   const shutdown = async () => {

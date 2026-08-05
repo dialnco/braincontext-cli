@@ -1,5 +1,6 @@
 import type React from 'react'
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react'
+import { type AuthState, authApi, type Capability } from '../api/access'
 import { ApiError, api } from '../api/client'
 import { projectsApi } from '../api/projects'
 import type { ProjectInfo, ProjectStatus } from '../api/types'
@@ -27,6 +28,27 @@ interface AppState {
   rev: number
   bump: () => void
   toast: (message: string) => void
+  /** Who we are on this store. Null until the first /auth/me resolves. */
+  auth: AuthState | null
+  refreshAuth: () => Promise<void>
+  login: (key: string) => Promise<void>
+  logout: () => Promise<void>
+  /**
+   * Force the sign-in screen while already authenticated.
+   *
+   * Needed because signing out cannot end an ADOPTED session: that identity comes
+   * from the key this machine holds on disk, so clearing the cookie just re-adopts
+   * it. Signing in as someone else is the only way to change identity there.
+   */
+  promptLogin: boolean
+  beginSwitchIdentity: () => void
+  cancelSwitchIdentity: () => void
+  /**
+   * Whether the current identity holds a capability. True when access control is
+   * off, so every existing project keeps its full UI. This drives affordances only
+   * — the server refuses the request either way.
+   */
+  can: (capability: Capability) => boolean
 }
 
 const Ctx = createContext<AppState | null>(null)
@@ -44,6 +66,8 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
   const [projects, setProjects] = useState<ProjectInfo[]>([])
   const [rev, setRev] = useState(0)
   const [toastMsg, setToastMsg] = useState<string | null>(null)
+  const [auth, setAuth] = useState<AuthState | null>(null)
+  const [promptLogin, setPromptLogin] = useState(false)
 
   const toggleTheme = useCallback(() => {
     setTheme((t) => {
@@ -112,9 +136,67 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
     }
   }, [bump, toast])
 
+  const refreshAuth = useCallback(async () => {
+    try {
+      setAuth(await authApi.me())
+    } catch {
+      // The server is briefly unavailable (a project switch, a restart). Leaving the
+      // previous answer in place avoids flashing the login screen at someone who is
+      // signed in; the next call corrects it.
+    }
+  }, [])
+
+  const login = useCallback(
+    async (key: string) => {
+      const next = await authApi.login(key)
+      setAuth(next)
+      setPromptLogin(false)
+      bump()
+      toast(`Signed in as ${next.identity?.handle ?? 'unknown'}`)
+    },
+    [bump, toast],
+  )
+
+  const logout = useCallback(async () => {
+    try {
+      await authApi.logout()
+    } finally {
+      // The server may hand back an adopted identity immediately (this machine's
+      // key), so report what actually happened rather than assuming "signed out".
+      const next = await authApi.me().catch(() => null)
+      if (next) setAuth(next)
+      bump()
+      toast(
+        next?.authenticated
+          ? `Signed out — now using this machine's key (${next.identity?.handle ?? 'unknown'})`
+          : 'Signed out',
+      )
+    }
+  }, [bump, toast])
+
+  const beginSwitchIdentity = useCallback(() => setPromptLogin(true), [])
+  const cancelSwitchIdentity = useCallback(() => setPromptLogin(false), [])
+
+  const can = useCallback(
+    (capability: Capability) => {
+      // Unknown or disabled → permissive: a project without access control must look
+      // exactly as it did before this feature existed.
+      if (!auth?.enabled) return true
+      return auth.identity?.capabilities.includes(capability) ?? false
+    },
+    [auth],
+  )
+
   useEffect(() => {
     refreshProjects()
   }, [refreshProjects])
+
+  // Identity is re-read on every project switch: a key issued by one project does
+  // not authenticate against another, so `rev` (which bumps on switch) is the trigger.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: refetch on project switch
+  useEffect(() => {
+    void refreshAuth()
+  }, [refreshAuth, rev])
 
   // Live refresh: poll the store's data_version so writes from OTHER connections
   // (agents via MCP, the CLI) show up without a manual reload. Any change means
@@ -155,6 +237,14 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
       rev,
       bump,
       toast,
+      auth,
+      refreshAuth,
+      login,
+      logout,
+      can,
+      promptLogin,
+      beginSwitchIdentity,
+      cancelSwitchIdentity,
     }),
     [
       theme,
@@ -169,6 +259,14 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
       rev,
       bump,
       toast,
+      auth,
+      refreshAuth,
+      login,
+      logout,
+      can,
+      promptLogin,
+      beginSwitchIdentity,
+      cancelSwitchIdentity,
     ],
   )
 

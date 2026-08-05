@@ -4,6 +4,7 @@ import { type FileMeta, fileContentUrl, filesApi, type StorageStatus } from '../
 import { Icon } from '../components/common/Icon'
 import { Hov, sx } from '../lib/dc'
 import { useApp } from '../state/StoreContext'
+import { AccessSection } from './AccessSection'
 
 const label =
   "display:block;font:600 11px 'IBM Plex Mono';letter-spacing:.08em;text-transform:uppercase;color:var(--muted);margin:14px 0 5px;"
@@ -71,9 +72,45 @@ function groupFiles(files: FileMeta[], groupBy: 'date' | 'type'): FileGroup[] {
 }
 
 /**
- * Store settings (#/settings). Currently one section: S3/R2 file storage. The
- * secret is write-only — it is submitted only when the field is non-empty and is
- * never echoed back by the API.
+ * Who you are on this store, plus a way out. Rendered only when the project has
+ * access control on — otherwise there is no identity to show.
+ */
+function IdentityBadge() {
+  const app = useApp()
+  const identity = app.auth?.enabled ? app.auth.identity : null
+  if (!identity) return null
+  return (
+    <>
+      <span
+        style={sx("font:500 12.5px 'IBM Plex Mono';color:var(--muted);")}
+        title={`Capabilities: ${identity.capabilities.join(', ')}`}
+      >
+        {identity.handle} · {identity.role}
+      </span>
+      <Hov
+        base={sx(
+          "padding:4px 10px;border-radius:7px;border:1px solid var(--border);background:var(--surface);cursor:pointer;color:var(--ink-soft);font:500 12px 'IBM Plex Sans';",
+        )}
+        hover={sx('border-color:var(--accent);color:var(--accent-ink);')}
+        // An adopted identity comes from the key on this machine, so signing out
+        // would just re-adopt it. Offer the thing that actually works instead.
+        onClick={() => (app.auth?.adopted ? app.beginSwitchIdentity() : void app.logout())}
+        title={
+          app.auth?.adopted
+            ? "This identity comes from this machine's stored key — sign in to use another"
+            : 'Sign out of Studio'
+        }
+      >
+        {app.auth?.adopted ? 'Switch identity' : 'Sign out'}
+      </Hov>
+    </>
+  )
+}
+
+/**
+ * Store settings (#/settings). Two sections: S3/R2 file storage, and — for anyone
+ * who can manage them — users and keys. The storage secret is write-only: it is
+ * submitted only when the field is non-empty and is never echoed back by the API.
  */
 export function SettingsView({ onNav }: { onNav: (v: 'wiki' | 'contexts' | 'settings') => void }) {
   const app = useApp()
@@ -192,6 +229,7 @@ export function SettingsView({ onNav }: { onNav: (v: 'wiki' | 'contexts' | 'sett
         </Hov>
         <span style={sx("font:600 15px 'IBM Plex Sans';color:var(--ink);")}>Settings</span>
         <span style={sx('flex:1;')} />
+        <IdentityBadge />
         <Hov
           base={sx(
             'width:32px;height:32px;border-radius:8px;border:1px solid var(--border);background:var(--surface);display:flex;align-items:center;justify-content:center;cursor:pointer;color:var(--ink-soft);',
@@ -396,6 +434,10 @@ export function SettingsView({ onNav }: { onNav: (v: 'wiki' | 'contexts' | 'sett
               })}
             </>
           )}
+
+          {/* Users & keys — only for an identity that can manage them. The routes
+              enforce this too; hiding it just avoids showing a panel that 403s. */}
+          {app.can('users.manage') && <AccessSection />}
         </div>
       </div>
     </>

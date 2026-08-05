@@ -1,12 +1,31 @@
 import type { Command } from 'commander'
 import type { Kysely } from 'kysely'
+import { resolveCommandCapability } from '../core/access/commands'
 import { type Context, getContext } from '../core/contexts'
 import type { DbOpts } from '../core/paths'
 import type { Database } from '../core/types'
 
-/** Pull the inherited global store flags (--db/--global/--local/--project/--no-sync). */
+/**
+ * The command's full path, root name excluded: `bctx wiki table set` → `wiki table set`.
+ * The root program is the only Command without a parent, which is what stops the walk.
+ */
+export function commandPath(command: Command): string {
+  const parts: string[] = []
+  for (let c: Command | null = command; c?.parent; c = c.parent) parts.unshift(c.name())
+  return parts.join(' ')
+}
+
+/**
+ * Pull the inherited global store flags (--db/--global/--local/--project/--no-sync)
+ * plus the access capability this command requires.
+ *
+ * Deriving the capability here — rather than at each of the ~70 call sites — is why
+ * gating the CLI needed no changes inside the command handlers: every one of them
+ * already funnels its store access through `withDb(dbOptsFrom(command), …)`.
+ */
 export function dbOptsFrom(command: Command): DbOpts {
   const o = command.optsWithGlobals()
+  const action = commandPath(command)
   // commander exposes `--no-sync` as `o.sync === false`.
   return {
     db: o.db,
@@ -14,6 +33,8 @@ export function dbOptsFrom(command: Command): DbOpts {
     local: o.local,
     project: o.project,
     noSync: o.sync === false,
+    requires: resolveCommandCapability(action),
+    action,
   }
 }
 

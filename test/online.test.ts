@@ -6,8 +6,9 @@ import { type Kysely, sql } from 'kysely'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { createContext, getContext, searchContexts } from '../src/core/contexts'
 import { kyselyFor } from '../src/core/db'
-import { contextRowCount, seedDatabase } from '../src/core/dump'
+import { contextRowCount, SEED_TABLES, seedDatabase } from '../src/core/dump'
 import { migrateToLatest } from '../src/core/migrate'
+import { setConfigValue } from '../src/core/storeConfig'
 import type { Database } from '../src/core/types'
 import { addLink, createPage } from '../src/core/wiki'
 
@@ -100,5 +101,49 @@ describe('online seed (migrate-online core)', () => {
     await createContext(remote.db, { body: 'existing', kind: 'note' })
     expect(await contextRowCount(remote.db)).toBeGreaterThan(0)
     await remote.close()
+  })
+
+  it('carries per-store config and page properties to the remote', async () => {
+    const local = await fileDb(join(dir, 'cfg-local.db'))
+    await setConfigValue(local.db, 'storage.bucket', 'notes')
+    await createPage(local.db, {
+      title: 'Props',
+      pageType: 'concept',
+      body: 'x',
+      metadata: { props: { status: 'active' } },
+    })
+
+    const remote = await fileDb(join(dir, 'cfg-remote.db'))
+    const counts = await seedDatabase(local.db, remote.db)
+
+    // Regression: these three tables were absent from SEED_TABLES, so going online
+    // silently dropped the storage credentials, the file index, and the props mirror.
+    expect(counts.store_config).toBe(1)
+    expect(counts.page_properties).toBe(1)
+    expect(counts.files).toBe(0)
+    const bucket = await sql<{
+      value: string
+    }>`SELECT value FROM store_config WHERE key='storage.bucket'`.execute(remote.db)
+    expect(bucket.rows[0]?.value).toBe('notes')
+
+    await local.close()
+    await remote.close()
+  })
+})
+
+describe('SEED_TABLES', () => {
+  it('covers every table in the live schema, so a new migration cannot drift', async () => {
+    const h = await fileDb(join(dir, 'drift.db'))
+    // FTS5 shadow tables (contexts_fts*) are rebuilt by the insert triggers on the
+    // destination; kysely_migration* is the migrator's own bookkeeping.
+    const r = await sql<{ name: string }>`
+      SELECT name FROM sqlite_master
+      WHERE type = 'table'
+        AND name NOT LIKE 'sqlite_%'
+        AND name NOT LIKE 'kysely_%'
+        AND name NOT LIKE 'contexts_fts%'
+    `.execute(h.db)
+    expect(r.rows.map((x) => x.name).sort()).toEqual([...SEED_TABLES].sort())
+    await h.close()
   })
 })

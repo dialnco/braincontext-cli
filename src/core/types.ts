@@ -81,6 +81,8 @@ export interface ContextsTable {
   created_at: string
   updated_at: string
   deleted_at: string | null
+  /** Authenticated author, when the project has access control on. See 0004. */
+  principal_id: string | null
 }
 
 export interface TagsTable {
@@ -101,6 +103,8 @@ export interface ContextHistoryTable {
   new_body: string | null
   agent_source: string | null
   changed_at: string
+  /** Authenticated author, when the project has access control on. See 0004. */
+  principal_id: string | null
 }
 
 /** Sidecar files of a SKILL.md bundle (scripts/references/assets). See 0002. */
@@ -181,6 +185,69 @@ export interface FilesTable {
   created_at: string
   /** Soft delete keeps the id stable for dangling markdown references. */
   deleted_at: string | null
+  /** Authenticated uploader, when the project has access control on. See 0004. */
+  principal_id: string | null
+}
+
+// ---------------------------------------------------------------------------
+// Access control (see 0004 and core/access/). Inert until `access.enabled`.
+// ---------------------------------------------------------------------------
+
+/** Project roles, ordered most- to least-privileged. */
+export const ROLES = ['owner', 'admin', 'writer', 'reader'] as const
+export type Role = (typeof ROLES)[number]
+
+export const PRINCIPAL_STATUSES = ['active', 'disabled'] as const
+export type PrincipalStatus = (typeof PRINCIPAL_STATUSES)[number]
+
+/** A named identity on this project. */
+export interface PrincipalsTable {
+  id: string
+  handle: string
+  display_name: string | null
+  role: Role
+  /** JSON object of per-capability overrides merged over the role defaults. */
+  capabilities: string | null
+  status: PrincipalStatus
+  created_at: string
+  /** Principal id of the creator (null for the bootstrap owner). */
+  created_by: string | null
+  updated_at: string
+}
+
+/** A key belonging to a principal. The secret itself is never stored. */
+export interface PrincipalKeysTable {
+  id: string
+  principal_id: string
+  label: string | null
+  /** Public lookup half of `bctxk.<prefix>.<secret>`. */
+  prefix: string
+  /** PHC-style `scrypt$N$r$p$salt$hash`. */
+  secret_hash: string
+  created_at: string
+  expires_at: string | null
+  last_used_at: string | null
+  revoked_at: string | null
+  created_by: string | null
+}
+
+/** Append-only allow/deny decisions. `handle` is denormalized so the log
+ *  outlives the principal it describes. */
+export interface AccessLogTable {
+  id: Generated<number>
+  at: string
+  principal_id: string | null
+  handle: string | null
+  agent_source: string | null
+  /** 'cli' | 'studio' | 'mcp'. */
+  surface: string
+  /** The command path or route that was attempted, e.g. `wiki new`. */
+  action: string
+  target_type: string | null
+  target_id: string | null
+  decision: 'allow' | 'deny'
+  /** JSON-encoded extra detail (e.g. the missing capability). */
+  detail: string | null
 }
 
 export interface Database {
@@ -195,4 +262,7 @@ export interface Database {
   page_properties: PagePropertiesTable
   store_config: StoreConfigTable
   files: FilesTable
+  principals: PrincipalsTable
+  principal_keys: PrincipalKeysTable
+  access_log: AccessLogTable
 }

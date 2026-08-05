@@ -3,8 +3,11 @@ import { dirname } from 'node:path'
 import { type Client, createClient } from '@libsql/client'
 import { LibsqlDialect } from '@libsql/kysely-libsql'
 import { Kysely, sql } from 'kysely'
+import { enterGate } from './access/gate'
+import { runWithSession, type SessionResult } from './access/session'
 import { migrateToLatest } from './migrate'
 import { type DbOpts, resolveTarget } from './paths'
+import { resolveAccessKey } from './registry'
 import type { Database } from './types'
 
 /**
@@ -17,9 +20,16 @@ import type { Database } from './types'
  *               seed during `migrate-online` and for fully-online usage.
  */
 export type DbTarget =
-  | { mode: 'local'; file: string }
-  | { mode: 'replica'; file: string; syncUrl: string; authToken?: string; syncInterval?: number }
-  | { mode: 'remote'; url: string; authToken?: string }
+  | { mode: 'local'; file: string; project?: string }
+  | {
+      mode: 'replica'
+      file: string
+      syncUrl: string
+      authToken?: string
+      syncInterval?: number
+      project?: string
+    }
+  | { mode: 'remote'; url: string; authToken?: string; project?: string }
 
 /**
  * Busy timeout (ms) for local `file:` databases. Passed as the libSQL client
@@ -113,12 +123,18 @@ export async function dataVersion(db: Kysely<Database>): Promise<number> {
 
 /**
  * Resolve the connection target, ensure its directory exists, open it, freshen a
- * replica, run any pending migrations (idempotent), run `fn`, settle the replica,
- * then always close the connection.
+ * replica, run any pending migrations (idempotent), enforce access control, run
+ * `fn`, settle the replica, then always close the connection.
+ *
+ * The access gate sits here — after migrations (its tables must exist) and before
+ * `fn` — because this is the one path every CLI command's store access goes
+ * through. `fn` receives the possibly read-only-wrapped handle plus the resolved
+ * session, and runs inside `runWithSession` so writes downstream can attribute
+ * themselves without threading an actor argument through core/.
  */
 export async function withDb<T>(
   opts: DbOpts,
-  fn: (db: Kysely<Database>) => Promise<T>,
+  fn: (db: Kysely<Database>, access: SessionResult) => Promise<T>,
 ): Promise<T> {
   const target = resolveTarget(opts)
   if (target.mode !== 'remote') mkdirSync(dirname(target.file), { recursive: true })
@@ -129,7 +145,13 @@ export async function withDb<T>(
     await migrateToLatest(store.db, {
       lockFile: target.mode !== 'remote' ? target.file : undefined,
     })
-    const result = await fn(store.db)
+    const gate = await enterGate(store.db, {
+      key: resolveAccessKey(target.project),
+      requires: opts.requires,
+      action: opts.action ?? 'cli',
+      surface: 'cli',
+    })
+    const result = await runWithSession(gate.session, () => fn(gate.db, gate.result))
     if (!opts.noSync) await store.sync()
     return result
   } finally {

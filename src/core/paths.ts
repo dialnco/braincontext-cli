@@ -1,6 +1,7 @@
 import { existsSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
+import type { CommandCapability } from './access/commands'
 import type { DbTarget } from './db'
 import { DEFAULT_PROJECT, getProject, projectToTarget, readConfig } from './registry'
 
@@ -18,6 +19,14 @@ export interface DbOpts {
   project?: string
   /** Skip replica sync for this operation (faster; may read/write stale). */
   noSync?: boolean
+  /**
+   * Capability to enforce when the store has access control on; `null` runs
+   * ungated. Filled in by `dbOptsFrom` from the command path, so no call site has
+   * to remember it. Omitted (undefined) means the same as `null`.
+   */
+  requires?: CommandCapability
+  /** What was attempted, for the access log. Defaults to the command path. */
+  action?: string
 }
 
 /** ~/.braincontext/store.db */

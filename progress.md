@@ -151,11 +151,51 @@ and remote connections, so "go online" is a config change, not a rewrite. No aut
 - [x] Vitest: `test/registry.test.ts` (precedence, token isolation + 0600, default seed) and `test/online.test.ts` (FTS5 lock + faithful remote seed); **59 tests** total, all gates green.
 - [x] Verified end-to-end on `dist/`: project create/use/isolation/`--project` override/status/path/rm (local). The replica/sync round-trip needs a real `libsql://` remote (manually verifiable); the seed (its core) is unit-tested.
 
-> **Auth/permissions = North Star, not built.** Future managed control-plane: accounts,
-> project membership, RBAC (owner/editor/viewer), and server-minted scoped tokens
-> (`bctx login`, `bctx project share … --role editor`). Reuses `agent_source` +
-> `context_history` for attribution/audit. **Phase 3:** offline-write reconciliation
-> (Turso CDC / `updated_at` merge). **S3/R2** = backup only, never a sync backend.
+> **Phase 3:** offline-write reconciliation (Turso CDC / `updated_at` merge).
+> **S3/R2** = backup only, never a sync backend.
+
+## Access control — users, keys, roles (shipped)
+
+Per-member permissions on a shared project. Migration `0004_access` adds `principals`,
+`principal_keys` (scrypt hashes + a public lookup prefix; the secret is never stored) and
+`access_log`, plus a nullable `principal_id` on `contexts`/`context_history`/`files`.
+Inert until `store_config['access.enabled']` is set, so every existing project is
+unaffected — `resolveSession` short-circuits on one indexed config read.
+
+- [x] **Core** — `src/core/access/`: `capabilities` (9 capabilities × 4 roles + per-user
+      overrides), `keys` (scrypt, `bctxk.<prefix>.<secret>`, all failure modes distinguished),
+      `principals` (CRUD + last-owner / admin-vs-owner policy), `session` (+ `AsyncLocalStorage`
+      for attribution), `gate` (`authorize` + `restrictForSession`), `readonly` (Kysely
+      write-rejecting plugin, allow-list so new node kinds fail closed), `audit`, `joincode`
+      (checksummed, so a mangled paste says so), `cache` (60s revocation window for long-lived
+      surfaces).
+- [x] **CLI** — gated inside `withDb` via a command-path → capability map
+      (`src/core/access/commands.ts`), filled in by `dbOptsFrom`, so **no command handler
+      changed**. `buildProgram()` extracted to `src/program.ts` so a test can walk the tree;
+      unmapped paths fail closed. New: `bctx access {init,status,disable,recover,user,key,log}`,
+      `bctx whoami`, `bctx project join <code>`.
+- [x] **MCP** — `installAccessGate` wraps `registerTool`/`registerResource` once, so all 33
+      tools (and any added later) are gated; denials come back as a readable `isError` message
+      an agent can act on.
+- [x] **Studio** — `accessGuard` beside `localOnlyGuard`, rule-based route→capability mapping,
+      cookie sessions with local-key adoption (the admin who launched Studio is already signed
+      in), `/api/auth/*`, `/api/access/*`, a login gate, and a Users & access settings panel
+      that reveals each secret exactly once.
+- [x] **Latent bug fixed** — `SEED_TABLES` in `src/core/dump.ts` listed only the `0001` tables,
+      so `migrate-online` silently dropped `page_properties`, `store_config` (the storage
+      credentials!) and `files`. Now complete, with a drift test against `sqlite_master`.
+- [x] Vitest: `access`, `command-caps`, `mcp-access`, `studio-auth` (+ migration/seed
+      coverage) — **319 tests**, all gates green. Verified end-to-end on `dist/` across two
+      isolated `BCTX_HOME`s (join code → reader → denials → promotion → revocation → recovery)
+      and in the browser.
+
+> **Advisory, and documented as such.** Clients sync against the libSQL primary directly, so
+> the raw database token bypasses all of this and the join code carries that token. What this
+> buys: roles, attribution, audit, revocation, mistake-prevention across every bctx surface.
+> `access.mode` is reserved (`advisory | token | relay`) so the two hard-enforcement upgrades
+> — per-user Turso tokens (real read-only), then a write-relay — are a value change, not a
+> redesign. **Still out of scope:** binding Studio beyond `127.0.0.1` (no TLS, no rate limit),
+> and resource-scoped permissions (per-tag / per-namespace).
 
 ## Concurrency hardening — multi-agent stress pass (shipped)
 

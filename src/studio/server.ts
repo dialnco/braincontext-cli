@@ -3,6 +3,9 @@ import { readFile } from 'node:fs/promises'
 import { extname, join, normalize, sep } from 'node:path'
 import { Hono, type MiddlewareHandler } from 'hono'
 import type { StoreFactory } from '../core/storage/s3'
+import { accessGuard, createStudioSessions } from './access'
+import { accessRoutes } from './routes/access'
+import { authRoutes } from './routes/auth'
 import { contextsRoutes } from './routes/contexts'
 import { exportRoutes } from './routes/export'
 import { filesRoutes } from './routes/files'
@@ -31,6 +34,12 @@ export interface StudioAppOpts {
   staticDir: string
   /** Object-store factory override so tests can fake S3/R2 (defaults to the real client). */
   filesStoreFactory?: StoreFactory
+  /**
+   * This machine's access key for the served project. Requests without a session
+   * cookie adopt it, so the person who ran `bctx studio` is already signed in as
+   * the identity their CLI uses. Omit it to require an explicit browser login.
+   */
+  localKey?: string | null
 }
 
 // Loopback host names. The server binds 127.0.0.1, but that alone does not stop a
@@ -110,9 +119,17 @@ export function buildStudioApp(provider: StoreProvider, opts: StudioAppOpts): Ho
     }
   })
 
+  // Identity + capability check. After localOnlyGuard (so the request has already
+  // passed the rebinding/CSRF checks) and before every route. A project without
+  // access control falls straight through, unchanged.
+  const sessions = createStudioSessions()
+  app.use('/api/*', accessGuard({ provider, sessions, localKey: opts.localKey }))
+
   // --- read/write JSON API (same-origin) ---
   app.route('/api', healthRoutes(provider))
+  app.route('/api', authRoutes(provider, sessions, { localKey: opts.localKey }))
   app.route('/api', projectsRoutes(provider))
+  app.route('/api/access', accessRoutes(provider))
   app.route('/api/contexts', contextsRoutes(provider))
   app.route('/api/wiki', wikiRoutes(provider))
   app.route('/api/tags', tagsRoutes(provider))
