@@ -64,15 +64,25 @@ bctx project list                   # * marks the current project
 bctx --project personal list        # target another project for one command
 ```
 
-**Going online** (bring your own libSQL URL — Turso's free tier or a self-hosted `sqld`):
+**Going online** (bring your own libSQL URL — Turso's free tier or a self-hosted `sqld`).
+You do this **once**, on the machine that has the remote's credentials:
 
 ```bash
-# Device 1 — push the local project up to a fresh remote, then become a replica:
 bctx project migrate-online work --url libsql://work-org.turso.io --auth-token "$TOKEN"
+```
 
-# Device 2 (or a teammate) — attach to the existing remote, bootstrap a local replica:
+That seeds a fresh (empty) remote from your local store and turns the local file into an
+embedded replica. To attach **another of your own devices** to a remote you already have
+credentials for, use `link`:
+
+```bash
 bctx project link work --url libsql://work-org.turso.io --auth-token "$TOKEN"
+```
 
+To add **other people**, don't hand out the URL and token — issue a join code instead
+(see [Users & permissions](#users--permissions)).
+
+```bash
 bctx project sync work              # pull the latest now (also runs automatically)
 bctx project status work            # mode, location, sync settings
 bctx project disconnect work        # revert to a plain local store
@@ -93,21 +103,52 @@ A shared project can name its members and give each one a role. Roles are enforc
 every bctx surface — the CLI, `bctx studio`, and the MCP server — and every mutation is
 attributed and logged.
 
-```bash
-bctx access init                          # become owner; switch enforcement on
-bctx access user add ana --role writer    # prints a one-paste join code
-bctx project join <code>                  # on ana's machine — stores her key, done
+### Inviting someone — the recommended flow
 
+**You (once, on the project):**
+
+```bash
+bctx access init                          # you become owner; enforcement switches on
+bctx access user add ana --role writer    # creates the user AND prints a join code
+```
+
+**Ana (once, on her machine) — a single command, nothing set up beforehand:**
+
+```bash
+bctx project join bctxj.…
+# → Joined "work" as ana (writer).
+```
+
+That one command registers the project, bootstraps her local replica, syncs it, saves both
+the database token and her access key to `~/.braincontext/credentials.json` (`0600`), and
+makes it her current project. She can read and write immediately. **No `project link`
+first — the join code already carries the connection.**
+
+This is the way to onboard people. Sharing the raw `--url` + `--auth-token` still works
+(and is what `link` is for on your *own* second device), but it gives everyone identical
+unrestricted access with nothing to revoke short of rotating the token for the whole team.
+
+> **Order matters:** the join code only carries the connection if the project is *already
+> online*. Take it online first (`migrate-online`), then invite. If you enabled access
+> control while still local, issue a fresh code once you're online:
+> `bctx access key issue ana --join-code`.
+
+### Day to day
+
+```bash
 bctx whoami                               # who am I here, and what may I do
 bctx access user ls                       # roles at a glance
+bctx access user show ana                 # role, capabilities, her keys
 bctx access user update ana --cap "-delete"   # per-user exception to the role
+bctx access user update ana --disable     # block without deleting them or their history
+bctx access key issue ana --join-code     # a replacement / second-device code
 bctx access key revoke <keyId>            # takes effect at each client's next sync
 bctx access log --deny-only               # what was refused, and to whom
 ```
 
 Roles: `owner` and `admin` (everything), `writer` (read/write/delete + files), `reader`
 (read only). `--cap "+x,-y"` layers exceptions over a role. Keys are shown **once**, at
-creation, and stored only as scrypt hashes.
+creation, and stored only as scrypt hashes — nothing can print an existing key.
 
 > **This is advisory, not a security boundary.** Clients sync against the libSQL primary
 > directly, so anyone holding the raw database token can bypass these rules with any

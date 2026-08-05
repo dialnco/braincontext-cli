@@ -10,8 +10,16 @@ import type { Database } from '../core/types'
 /**
  * Capability required by each MCP tool. Mirrors COMMAND_CAPABILITIES for the CLI —
  * `test/mcp-access.test.ts` asserts every registered tool appears here.
+ *
+ * `null` means deliberately ungated. A name that is ABSENT is a different thing: it
+ * fails closed on `project.manage`, so a tool added without a decision here is
+ * locked down rather than silently public.
  */
-export const MCP_TOOL_CAPABILITIES: Record<string, Capability> = {
+export const MCP_TOOL_CAPABILITIES: Record<string, Capability | null> = {
+  // Identity. Ungated on purpose — the agents that most need it are the ones whose
+  // calls are being refused, and it exposes only the caller's own role.
+  whoami: null,
+
   // Contexts.
   search_contexts: 'read',
   get_context: 'read',
@@ -74,9 +82,10 @@ export function installAccessGate(server: McpServer, ctx: McpAccessContext): voi
   const registerTool = server.registerTool.bind(server)
   const registerResource = server.registerResource.bind(server)
 
-  const check = async (action: string, capability: Capability) => {
+  const check = async (action: string, capability: Capability | null) => {
     const result = await ctx.session()
-    await authorize(ctx.db, result, { requires: capability, action, surface: 'mcp' })
+    if (capability)
+      await authorize(ctx.db, result, { requires: capability, action, surface: 'mcp' })
     return result.enabled && result.ok ? result.session : null
   }
 
@@ -85,7 +94,10 @@ export function installAccessGate(server: McpServer, ctx: McpAccessContext): voi
       name as never,
       config as never,
       (async (...args: never[]) => {
-        const capability = MCP_TOOL_CAPABILITIES[name] ?? 'project.manage'
+        // Absent (not merely null) means nobody decided — fail closed.
+        const capability = Object.hasOwn(MCP_TOOL_CAPABILITIES, name)
+          ? (MCP_TOOL_CAPABILITIES[name] as Capability | null)
+          : 'project.manage'
         let session: Awaited<ReturnType<typeof check>>
         try {
           session = await check(name, capability)

@@ -22,6 +22,12 @@ serialize (no corruption/lost writes), and same-entry edits are last-writer-wins
 values kept in history. One caveat: don't run CLI writes against an online project while a
 `bctx mcp` server owns that replica file on the same machine (see `references/projects.md`).
 
+**Permissions:** a shared project may limit what you can do. Run `bctx whoami` to see your
+role and capabilities (it works even when everything else is refused). A refusal starts with
+`Permission denied:` and names the capability you lack — that is final, so do the parts you
+can, then tell the user what you couldn't and which capability it needed. Don't retry it or
+reach the same data another way. Most projects have this off entirely. → `references/access.md`
+
 ## Two ways to use braincontext
 
 - **Wiki (preferred)** — for durable, **interlinked** knowledge built from sources:
@@ -80,4 +86,5 @@ bctx skills get braincontext --full        # this doc + all references
 - `references/workflows.md` — common save/retrieve/update flows
 - `references/search.md` — FTS5 query syntax and tips
 - `references/projects.md` — projects, switching, and online sync
+- `references/access.md` — users, keys, roles; what to do when you're refused
 - **`bctx skills get braincontext-wiki`** — the preferred wiki workflow (linked knowledge)

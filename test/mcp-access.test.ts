@@ -25,6 +25,11 @@ async function connectAs(db: Kysely<Database>, key: string | null): Promise<Clie
   return client
 }
 
+// biome-ignore lint/suspicious/noExplicitAny: MCP tool results are untyped content blocks
+function payload(result: any): any {
+  return JSON.parse(result.content[0].text)
+}
+
 async function storeWith(role: 'writer' | 'reader') {
   const db = await freshDb()
   await createPrincipal(db, { handle: 'boss', role: 'owner' })
@@ -42,10 +47,47 @@ describe('MCP access gate', () => {
     expect(names.length).toBeGreaterThan(30)
     // An unmapped tool falls back to `project.manage`, locking out everyone but an
     // admin. That is the fail-closed backstop, not the intended configuration.
-    expect(names.filter((n) => !MCP_TOOL_CAPABILITIES[n])).toEqual([])
+    // `hasOwn`, not truthiness: `null` is a deliberate "ungated", not a missing entry.
+    expect(names.filter((n) => !Object.hasOwn(MCP_TOOL_CAPABILITIES, n))).toEqual([])
     // And no stale entries for tools that no longer exist.
     const live = new Set(names)
     expect(Object.keys(MCP_TOOL_CAPABILITIES).filter((n) => !live.has(n))).toEqual([])
+    await db.destroy()
+  })
+
+  it('answers whoami even when every other tool is refused', async () => {
+    // The whole point: a denied agent must be able to find out WHY and stop retrying.
+    const { db, key } = await storeWith('reader')
+    const reader = await connectAs(db, key)
+    const mine = payload(await reader.callTool({ name: 'whoami', arguments: {} }))
+    expect(mine).toMatchObject({
+      accessControl: 'on',
+      authenticated: true,
+      handle: 'member',
+      role: 'reader',
+      readOnly: true,
+    })
+    expect(mine.capabilities).toContain('read')
+    expect(mine.capabilities).not.toContain('write')
+    expect(String(mine.note)).toMatch(/Do not retry/)
+    await db.destroy()
+
+    // Unauthenticated: still answers, and explains the way out.
+    const locked = await storeWith('writer')
+    const anon = await connectAs(locked.db, null)
+    expect((await anon.callTool({ name: 'list_contexts', arguments: {} })).isError).toBe(true)
+    const who = payload(await anon.callTool({ name: 'whoami', arguments: {} }))
+    expect(who.authenticated).toBe(false)
+    expect(String(who.message)).toMatch(/requires an access key/)
+    await locked.db.destroy()
+  })
+
+  it('reports access control as off when it is', async () => {
+    const db = await freshDb()
+    const client = await connectAs(db, null)
+    expect(payload(await client.callTool({ name: 'whoami', arguments: {} }))).toMatchObject({
+      accessControl: 'off',
+    })
     await db.destroy()
   })
 

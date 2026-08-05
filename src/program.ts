@@ -94,13 +94,15 @@ Files in S3/R2 (blobs in your bucket, metadata in the store):
 
 Projects & online sync (same context across sessions, devices, members):
   $ bctx project create work          ·   bctx project use work
-  $ bctx project migrate-online work --url libsql://… --auth-token …   # go online
-  $ bctx project link work --url libsql://… --auth-token …   # on another device
+  $ bctx project migrate-online work --url libsql://… --auth-token …   # go online (once)
+  $ bctx project link work --url libsql://… --auth-token …   # another of YOUR devices
 
-Shared projects with per-member permissions (advisory — see \`bctx access status\`):
-  $ bctx access init                  # become owner, switch enforcement on
+Adding people — issue a join code, don't share the url/token (advisory; see
+\`bctx access status\`):
+  $ bctx access init                           # become owner, switch enforcement on
   $ bctx access user add ana --role writer     # prints a one-paste join code
-  $ bctx project join <code>          # on the member's machine
+  $ bctx project join <code>                   # on ana's machine — ONE command, connection
+                                               # included; no \`project link\` needed first
   $ bctx whoami   ·   bctx access user ls   ·   bctx access log --deny-only
 
 Wiki pages are hidden from plain list/search (use --include-wiki to include them).

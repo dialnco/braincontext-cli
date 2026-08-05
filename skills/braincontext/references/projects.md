@@ -49,8 +49,12 @@ bctx project rm work [--keep-file]  # unregister (the "default" project can't be
 # Device 1 — push the local project up to a FRESH (empty) remote, then become a replica:
 bctx project migrate-online work --url libsql://work-org.turso.io --auth-token "$TOKEN"
 
-# Device 2 / a teammate — attach to the EXISTING remote and bootstrap a local replica:
+# Another of YOUR devices — attach to the EXISTING remote and bootstrap a local replica:
 bctx project link work --url libsql://work-org.turso.io --auth-token "$TOKEN"
+
+# A TEAMMATE — don't share the url/token. Issue a join code (see references/access.md):
+#   you:  bctx access user add ana --role writer   → prints a code
+#   ana:  bctx project join <code>                 → one command, connection included
 
 bctx project sync [name]            # pull the latest now (also runs automatically)
 bctx project status [name]          # mode, location, syncUrl, interval, token state
@@ -87,5 +91,6 @@ time. It's built for that:
   against the same online project on the same machine while the MCP server is running —
   route writes through the one MCP server, or use a separate device (its own replica).
   Different machines/replicas are always fine; the remote primary is always safe.
-- **Auth/permissions are not built yet** — group members currently share one project token.
-  A managed control-plane (accounts, roles, per-member tokens) is planned.
+- **Per-member permissions exist** — a project can name its members and give each a role,
+  enforced across the CLI, Studio and MCP. Off until someone runs `bctx access init`.
+  → `references/access.md`

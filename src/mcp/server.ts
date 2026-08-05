@@ -1,6 +1,7 @@
 import { McpServer, ResourceTemplate } from '@modelcontextprotocol/sdk/server/mcp.js'
 import type { Kysely } from 'kysely'
 import { z } from 'zod'
+import { describeFailure, resolveSession } from '../core/access/session'
 import {
   createContext,
   deleteContext,
@@ -40,6 +41,13 @@ same store at once. Writes are serialized and conflict-free; concurrent edits to
 entries merge, and edits to the same entry are last-writer-wins with prior values kept in
 append-only history. delete_context is soft-delete only (recoverable).
 
+Permissions: a shared store may restrict what this session may do. Tools you lack the
+capability for return an error starting "Permission denied" — that is final, so do NOT
+retry it or try to route around it with another tool. Call whoami to see your role and
+capabilities (it always works, even when everything else is refused), then tell the user
+what you could not do and which capability it needed. A read-only session should plan
+read-only work rather than drafting writes it cannot save.
+
 Online projects (a libSQL/Turso replica): reads are local-fast; writes go to the shared
 primary and propagate to all members, so they REQUIRE connectivity. This server owns its
 local replica file — while it is running, do not also run \`bctx\` CLI writes against the
@@ -62,6 +70,47 @@ export function buildServer(db: Kysely<Database>, access?: McpAccessContext): Mc
 
   // Before any registration: the gate works by wrapping the register* methods.
   if (access) installAccessGate(server, access)
+
+  server.registerTool(
+    'whoami',
+    {
+      title: 'Who am I',
+      description:
+        'Your identity and permissions on this store. Call this when a tool is refused with "Permission denied" — it tells you which capabilities you actually hold, so you can stop retrying and report accurately instead. Always allowed, even when other tools are not.',
+      inputSchema: {},
+    },
+    async () => {
+      // Falls back to an unauthenticated probe when the server was built without an
+      // access context, so the answer is honest either way.
+      const result = access ? await access.session() : await resolveSession(db, null)
+      if (!result.enabled) {
+        return ok({
+          accessControl: 'off',
+          note: 'This store has no access control — every tool is available.',
+        })
+      }
+      if (!result.ok) {
+        return ok({
+          accessControl: 'on',
+          authenticated: false,
+          reason: result.reason,
+          message: describeFailure(result.reason),
+        })
+      }
+      const { principal, readOnly } = result.session
+      return ok({
+        accessControl: 'on',
+        authenticated: true,
+        handle: principal.handle,
+        role: principal.role,
+        capabilities: principal.capabilities,
+        readOnly,
+        note: readOnly
+          ? 'Read-only: every write tool will be refused. Do not retry them.'
+          : undefined,
+      })
+    },
+  )
 
   server.registerTool(
     'search_contexts',

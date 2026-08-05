@@ -196,3 +196,9 @@ bctx wiki export <dir> / import <dir>     # Obsidian-compatible markdown round-t
 
 Load detail on demand: `bctx skills get braincontext-wiki --full`
 (`references/structure.md`, `ingest.md`, `query.md`, `lint.md`).
+
+**If a write is refused** with `Permission denied:`, the project has per-member permissions
+on and this identity may not edit. Run `bctx whoami` to see your role — a reader can still
+search, `wiki get`, `graph`, `related` and `lint`, so answer from the wiki and report what
+you could not file back, rather than retrying.
+→ `bctx skills get braincontext` (`references/access.md`)
