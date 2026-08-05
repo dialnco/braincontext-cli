@@ -3,6 +3,7 @@ import { Migrator } from 'kysely/migration'
 import { migration as init0001 } from '../migrations/0001_init'
 import { migration as pageProps0002 } from '../migrations/0002_page_properties'
 import { migration as files0003 } from '../migrations/0003_file_storage'
+import { migration as access0004 } from '../migrations/0004_access'
 import { withFileLock } from './lock'
 import type { Database } from './types'
 
@@ -12,8 +13,9 @@ const MIGRATIONS = {
   '0001_init': init0001,
   '0002_page_properties': pageProps0002,
   '0003_file_storage': files0003,
+  '0004_access': access0004,
 } as const
-const LATEST = '0003_file_storage'
+const LATEST = '0004_access'
 
 /** True if the latest migration is already recorded (fast path: no lock, no migrator). */
 async function isCurrent(db: Kysely<Database>): Promise<boolean> {

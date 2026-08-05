@@ -1,6 +1,8 @@
 import { mkdirSync } from 'node:fs'
 import { dirname } from 'node:path'
 import type { Kysely } from 'kysely'
+import { restrictForSession } from '../core/access/gate'
+import { currentSession } from '../core/access/session'
 import { type DbTarget, openStore, type Store } from '../core/db'
 import { migrateToLatest } from '../core/migrate'
 import { type DbOpts, resolveTarget } from '../core/paths'
@@ -37,7 +39,11 @@ export interface ProjectInfo {
  * the real {@link StoreManager}.
  */
 export interface StoreProvider {
-  /** The current store's Kysely handle. Re-read on every request — it changes on switch. */
+  /**
+   * The current store's Kysely handle. Re-read on every request — it changes on
+   * switch, and it reflects the caller: inside a request handled for a read-only
+   * principal it returns a handle that refuses writes (see restrictForSession).
+   */
   db(): Kysely<Database>
   status(): ProjectStatus
   projects(): ProjectInfo[]
@@ -125,7 +131,7 @@ export async function createStoreManager(opts: DbOpts): Promise<StoreProvider> {
   }
 
   return {
-    db: () => store.db,
+    db: () => restrictForSession(store.db, currentSession()),
     status,
     projects: () =>
       listProjects().map((p) => ({ name: p.name, mode: p.entry.mode, current: p.name === name })),
@@ -148,7 +154,7 @@ export async function createStoreManager(opts: DbOpts): Promise<StoreProvider> {
  */
 export function staticProvider(db: Kysely<Database>): StoreProvider {
   return {
-    db: () => db,
+    db: () => restrictForSession(db, currentSession()),
     status: () => ({ project: 'test', mode: 'local', location: ':test:', noSync: true }),
     projects: () => [{ name: 'test', mode: 'local', current: true }],
     switch: async () => ({ project: 'test', mode: 'local', location: ':test:', noSync: true }),

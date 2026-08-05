@@ -1,9 +1,13 @@
 import { mkdirSync } from 'node:fs'
 import { dirname } from 'node:path'
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
+import { createSessionResolver } from '../core/access/cache'
+import { restrictForSession } from '../core/access/gate'
+import { describeFailure } from '../core/access/session'
 import { openStore } from '../core/db'
 import { migrateToLatest } from '../core/migrate'
 import { type DbOpts, resolveTarget } from '../core/paths'
+import { resolveAccessKey } from '../core/registry'
 import { buildServer } from './server'
 
 /**
@@ -19,7 +23,30 @@ export async function runMcpStdio(opts: DbOpts): Promise<void> {
   await store.prepare()
   await store.sync()
   await migrateToLatest(store.db, { lockFile: target.mode !== 'remote' ? target.file : undefined })
-  const server = buildServer(store.db)
+
+  // Authenticate once, here, so tool handlers can close over a handle that already
+  // reflects the identity (a reader gets one that physically refuses writes). The
+  // resolver re-verifies on a short TTL, so a revoked key stops working without
+  // paying for a key hash on every tool call.
+  const key = resolveAccessKey(target.project)
+  const session = createSessionResolver(store.db, key)
+  const initial = await session()
+  const gatedDb = restrictForSession(
+    store.db,
+    initial.enabled && initial.ok ? initial.session : null,
+  )
+  const server = buildServer(gatedDb, { db: store.db, session })
+
+  if (initial.enabled) {
+    // stderr, so an agent operator can see why its tools are refusing. The server
+    // still starts: every tool call then answers with the reason, which an agent
+    // can relay, whereas refusing to boot usually shows up as a silent failure.
+    console.error(
+      initial.ok
+        ? `bctx mcp: authenticated as ${initial.session.principal.handle} (${initial.session.principal.role}).`
+        : `bctx mcp: NOT authenticated — ${describeFailure(initial.reason)}`,
+    )
+  }
 
   let closing = false
   const shutdown = async () => {

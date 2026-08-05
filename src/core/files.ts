@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto'
 import type { Kysely } from 'kysely'
 import { ulid } from 'ulidx'
+import { currentPrincipalId } from './access/session'
 import { createS3Store, type StoreFactory } from './storage/s3'
 import { getStorageConfig, type StorageConfig } from './storeConfig'
 import type { Database } from './types'
@@ -180,6 +181,7 @@ export async function uploadFile(
     metadata: '{}',
     created_at: new Date().toISOString(),
     deleted_at: null,
+    principal_id: currentPrincipalId(),
   }
   await db.insertInto('files').values(row).execute()
   return toMeta(row)

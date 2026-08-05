@@ -3,6 +3,7 @@ import { DARK, LIGHT } from './lib/theme'
 import { useRoute } from './state/router'
 import { StoreProvider, useApp } from './state/StoreContext'
 import { ContextsView } from './views/ContextsView'
+import { LoginView } from './views/LoginView'
 import { SettingsView } from './views/SettingsView'
 import { WikiView } from './views/WikiView'
 import './styles/studio.css'
@@ -32,10 +33,18 @@ function Shell() {
     fontFamily: "'IBM Plex Sans',sans-serif",
   } as React.CSSProperties
 
+  // Access control is on and this browser has no identity: every /api call would
+  // 401, so show the one screen that can fix that instead of an empty workspace.
+  // `auth === null` is "not asked yet" — render nothing rather than flash a login.
+  // `promptLogin` is the deliberate "sign in as someone else" path.
+  const locked = (app.auth?.enabled === true && !app.auth.authenticated) || app.promptLogin
+
   return (
     <div style={{ position: 'fixed', inset: 0, overflow: 'hidden' }}>
       <div style={vars}>
-        {view === 'contexts' ? (
+        {locked ? (
+          <LoginView message={app.auth?.message} />
+        ) : view === 'contexts' ? (
           <ContextsView onNav={onNav} />
         ) : view === 'settings' ? (
           <SettingsView onNav={onNav} />

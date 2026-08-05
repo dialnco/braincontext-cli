@@ -1,6 +1,10 @@
 import { mkdirSync, rmSync } from 'node:fs'
 import { dirname } from 'node:path'
 import { Command } from 'commander'
+import type { Capability } from '../core/access/capabilities'
+import { enterGate } from '../core/access/gate'
+import { decodeJoinCode } from '../core/access/joincode'
+import { describeFailure, resolveSession } from '../core/access/session'
 import { type DbTarget, openStore } from '../core/db'
 import { contextRowCount, seedDatabase } from '../core/dump'
 import { withFileLock } from '../core/lock'
@@ -15,7 +19,9 @@ import {
   projectFilePath,
   projectToTarget,
   removeProject,
+  resolveAccessKey,
   resolveToken,
+  setAccessKey,
   setCurrent,
   setToken,
   updateProject,
@@ -45,6 +51,20 @@ function requireProject(name: string): ProjectEntry {
   const entry = getProject(name)
   if (!entry) throw new Error(`No such project: "${name}". Run \`bctx project list\`.`)
   return entry
+}
+
+/**
+ * Enforce a capability for a project command. These commands open stores through
+ * `openStore`/`withTarget` (they manage topology, sometimes two stores at once), so
+ * they are outside `withDb`'s gate and have to ask for the check themselves.
+ */
+async function requireProjectCapability(
+  db: Awaited<ReturnType<typeof openStore>>['db'],
+  name: string,
+  capability: Capability,
+  action: string,
+): Promise<void> {
+  await enterGate(db, { key: resolveAccessKey(name), requires: capability, action, surface: 'cli' })
 }
 
 /** The token to use for an online operation: --auth-token > --auth-token-env > stored. */
@@ -81,6 +101,49 @@ async function reachRemote<T>(url: string, fn: () => Promise<T>): Promise<T> {
     const msg = e instanceof Error ? e.message : String(e)
     throw new Error(`Could not reach the remote primary at ${url}: ${msg}`)
   }
+}
+
+/**
+ * Attach this machine to an existing remote primary: bootstrap the local replica
+ * FIRST, so a failed connection leaves nothing half-registered, and only persist
+ * the registry entry after a successful sync. Shared by `link` and `join`.
+ */
+async function bootstrapReplica(opts: {
+  name: string
+  url: string
+  token: string
+  syncInterval?: number
+}): Promise<void> {
+  const { name, url, token, syncInterval } = opts
+  if (getProject(name)) throw new Error(`Project already exists: "${name}".`)
+  validateProjectName(name)
+  const file = projectFilePath({ mode: 'replica', file: defaultProjectFile(name), createdAt: '' })
+
+  mkdirSync(dirname(file), { recursive: true })
+  await withFileLock(`${file}.bootstrap.lock`, () =>
+    reachRemote(url, async () => {
+      const store = openStore({
+        mode: 'replica',
+        file,
+        syncUrl: url,
+        authToken: token,
+        syncInterval,
+      })
+      try {
+        await store.sync()
+      } finally {
+        await store.close()
+      }
+    }),
+  )
+
+  addProject(name, {
+    mode: 'replica',
+    file: defaultProjectFile(name),
+    syncUrl: url,
+    syncInterval,
+    createdAt: new Date().toISOString(),
+  })
 }
 
 export function projectCommand(): Command {
@@ -194,6 +257,13 @@ export function projectCommand(): Command {
         const syncInterval = parsePositiveInt(opts.syncInterval, 'sync-interval')
         const localFile = projectFilePath(entry)
 
+        // This command drives the store through `openStore` rather than `withDb`, so
+        // it does not inherit the gate there — publish the project only if the caller
+        // is allowed to manage it.
+        await withTarget({ mode: 'local', file: localFile, project: name }, (db) =>
+          requireProjectCapability(db, name, 'project.manage', 'project migrate-online'),
+        )
+
         // Serialize the whole bootstrap so two concurrent `migrate-online` runs can't
         // double-seed the remote or race the local-file swap.
         await withFileLock(`${localFile}.bootstrap.lock`, async () => {
@@ -248,47 +318,68 @@ export function projectCommand(): Command {
         name: string,
         opts: { url: string; authToken?: string; authTokenEnv?: string; syncInterval?: string },
       ) => {
-        if (getProject(name)) throw new Error(`Project already exists: "${name}".`)
-        validateProjectName(name)
         const token = operationToken(name, opts)
-        const syncInterval = parsePositiveInt(opts.syncInterval, 'sync-interval')
-        const file = projectFilePath({
-          mode: 'replica',
-          file: defaultProjectFile(name),
-          createdAt: '',
+        await bootstrapReplica({
+          name,
+          url: opts.url,
+          token,
+          syncInterval: parsePositiveInt(opts.syncInterval, 'sync-interval'),
         })
-
-        // Bootstrap the local replica from the primary FIRST, so a failed connection
-        // leaves nothing half-registered. Only persist after a successful sync.
-        mkdirSync(dirname(file), { recursive: true })
-        await withFileLock(`${file}.bootstrap.lock`, () =>
-          reachRemote(opts.url, async () => {
-            const store = openStore({
-              mode: 'replica',
-              file,
-              syncUrl: opts.url,
-              authToken: token,
-              syncInterval,
-            })
-            try {
-              await store.sync()
-            } finally {
-              await store.close()
-            }
-          }),
-        )
-
         if (opts.authToken) setToken(name, opts.authToken)
-        addProject(name, {
-          mode: 'replica',
-          file: defaultProjectFile(name),
-          syncUrl: opts.url,
-          syncInterval,
-          createdAt: new Date().toISOString(),
-        })
         console.log(`Linked project "${name}" ⇄ ${opts.url}. Run \`bctx project use ${name}\`.`)
       },
     )
+
+  // ── join (attach using a join code from the project admin) ─────────────────
+  project
+    .command('join <code>')
+    .description('Join a shared project from the join code your project admin gave you.')
+    .option('--name <name>', 'register under a different local name')
+    .option('--sync-interval <seconds>', 'background replica sync interval')
+    .option('--no-use', 'do not switch to the project after joining')
+    .action(async (code: string, opts: { name?: string; syncInterval?: string; use: boolean }) => {
+      const payload = decodeJoinCode(code)
+      const name = opts.name ?? payload.n
+
+      if (payload.u) {
+        if (!payload.t) {
+          throw new Error('Join code has a remote URL but no token — ask for a new code.')
+        }
+        await bootstrapReplica({
+          name,
+          url: payload.u,
+          token: payload.t,
+          syncInterval: parsePositiveInt(opts.syncInterval, 'sync-interval'),
+        })
+        setToken(name, payload.t)
+      } else if (!getProject(name)) {
+        // A code with no URL only carries the key: it is for a store the member
+        // already has (a local project shared by other means), not a remote one.
+        throw new Error(
+          `Join code carries no remote URL, and there is no local project "${name}" to attach the key to.`,
+        )
+      }
+      setAccessKey(name, payload.k)
+
+      // Identify the caller against the store they just synced — this is where a
+      // stale or already-revoked key surfaces, rather than on their next command.
+      const target = projectToTarget(name, requireProject(name))
+      const who = await withTarget(target, (db) => resolveSession(db, payload.k))
+      if (who.enabled && !who.ok) {
+        console.error(`Joined "${name}", but the key did not authenticate.`)
+        console.error(describeFailure(who.reason))
+        process.exitCode = 1
+        return
+      }
+
+      if (opts.use) setCurrent(name)
+      const identity =
+        who.enabled && who.ok
+          ? `${who.session.principal.handle} (${who.session.principal.role})`
+          : 'no access control on this project'
+      console.log(`Joined "${name}" as ${identity}.`)
+      if (!opts.use) console.log(`Run \`bctx project use ${name}\` to switch to it.`)
+    })
 
   // ── sync ──────────────────────────────────────────────────────────────────
   project

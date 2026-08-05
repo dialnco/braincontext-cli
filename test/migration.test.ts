@@ -14,8 +14,8 @@ const tableExists = async (db: Awaited<ReturnType<typeof freshDb>>, name: string
 }
 
 describe('migrations — incrementals upgrade an existing store without data loss', () => {
-  it('applies 0002 + 0003 to a store already at 0001, preserving data', async () => {
-    const db = await freshDb() // fully migrated (0001 + 0002 + 0003)
+  it('applies 0002 + 0003 + 0004 to a store already at 0001, preserving data', async () => {
+    const db = await freshDb() // fully migrated (0001 … 0004)
 
     // Seed real data BEFORE the "downgrade", to prove the migration preserves it.
     const page = await createPage(db, {
@@ -30,17 +30,24 @@ describe('migrations — incrementals upgrade an existing store without data los
     await sql`DROP TABLE page_properties`.execute(db)
     await sql`DROP TABLE files`.execute(db)
     await sql`DROP TABLE store_config`.execute(db)
-    await sql`DELETE FROM kysely_migration WHERE name IN ('0002_page_properties', '0003_file_storage')`.execute(
+    await sql`DROP TABLE access_log`.execute(db)
+    await sql`DROP TABLE principal_keys`.execute(db)
+    await sql`DROP TABLE principals`.execute(db)
+    await sql`DELETE FROM kysely_migration WHERE name IN ('0002_page_properties', '0003_file_storage', '0004_access')`.execute(
       db,
     )
     expect(await tableExists(db, 'page_properties')).toBe(false)
     expect(await tableExists(db, 'files')).toBe(false)
+    expect(await tableExists(db, 'principals')).toBe(false)
 
-    // The upgrade path: opening the store re-runs migrations → 0002 and 0003 apply.
+    // The upgrade path: opening the store re-runs migrations → 0002..0004 apply.
     await migrateToLatest(db)
     expect(await tableExists(db, 'page_properties')).toBe(true)
     expect(await tableExists(db, 'files')).toBe(true)
     expect(await tableExists(db, 'store_config')).toBe(true)
+    expect(await tableExists(db, 'principals')).toBe(true)
+    expect(await tableExists(db, 'principal_keys')).toBe(true)
+    expect(await tableExists(db, 'access_log')).toBe(true)
 
     const applied = await sql<{
       name: string
@@ -49,7 +56,15 @@ describe('migrations — incrementals upgrade an existing store without data los
       '0001_init',
       '0002_page_properties',
       '0003_file_storage',
+      '0004_access',
     ])
+
+    // 0004's ALTER TABLE half is idempotent: `contexts.principal_id` survived the
+    // partial rollback above, so re-running must not fail on a duplicate column.
+    const cols = await sql<{
+      name: string
+    }>`SELECT name FROM pragma_table_info('contexts')`.execute(db)
+    expect(cols.rows.map((r) => r.name)).toContain('principal_id')
 
     // Data survived the migration untouched.
     const still = await getContext(db, page.id)

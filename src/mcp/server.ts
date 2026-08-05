@@ -12,6 +12,7 @@ import {
 } from '../core/contexts'
 import { type Database, KINDS, SCOPES } from '../core/types'
 import { getVersion } from '../lib/pkg'
+import { installAccessGate, type McpAccessContext } from './access'
 import { registerWikiTools } from './wiki-tools'
 
 function ok(value: unknown) {
@@ -48,12 +49,19 @@ or use a separate device/replica.`
 /**
  * Build an MCP server exposing the store. Full CRUD by default; delete is
  * soft-only (never a hard delete over MCP — history keeps it recoverable).
+ *
+ * `access` gates every tool and resource against the identity the server started
+ * with. Omitting it leaves the server ungated, which is what the tests and any
+ * caller on a store without access control want.
  */
-export function buildServer(db: Kysely<Database>): McpServer {
+export function buildServer(db: Kysely<Database>, access?: McpAccessContext): McpServer {
   const server = new McpServer(
     { name: 'bctx', version: getVersion() },
     { instructions: INSTRUCTIONS },
   )
+
+  // Before any registration: the gate works by wrapping the register* methods.
+  if (access) installAccessGate(server, access)
 
   server.registerTool(
     'search_contexts',

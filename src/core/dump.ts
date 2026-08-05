@@ -7,8 +7,14 @@ import type { Database } from './types'
  * `contexts_fts` and its FTS5 shadow tables are intentionally excluded: the INSERT
  * trigger on `contexts` rebuilds the full-text index on the destination as rows
  * land, so copying them would be redundant (and corrupt the shadow layout).
+ *
+ * EVERY other table must be listed, including derived ones (`page_properties` is
+ * rebuilt on write, not on insert, so an unseeded copy would start empty) and
+ * `store_config` (whose whole point is that per-store settings travel with the
+ * project). `test/dump.test.ts` asserts this list against the live schema so a new
+ * migration can't silently drop a table from `bctx project migrate-online`.
  */
-const SEED_TABLES = [
+export const SEED_TABLES = [
   'contexts',
   'tags',
   'context_tags',
@@ -16,6 +22,12 @@ const SEED_TABLES = [
   'skill_files',
   'links',
   'wiki_log',
+  'page_properties',
+  'store_config',
+  'files',
+  'principals',
+  'principal_keys',
+  'access_log',
 ] as const
 
 function ident(name: string): string {

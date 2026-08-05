@@ -82,12 +82,43 @@ Writes are **write-through to one primary** (it serializes them, so there are no
 multi-master conflicts); concurrent edits to different entries merge cleanly (ULID ids),
 and same-entry edits are last-writer-wins with the prior value kept in history. Online
 writes require connectivity. **Tokens** are never stored in `config.json` — they live in
-`~/.braincontext/credentials.json` (mode `0600`) or `BCTX_TOKEN_<PROJECT>` env. Auth and
-per-member permissions are a planned managed-service layer; today, group members share a
-project token.
+`~/.braincontext/credentials.json` (mode `0600`) or `BCTX_TOKEN_<PROJECT>` env.
 
 > A plain SQLite file on S3/R2 is **not** a sync backend (single-writer only); use it for
 > backup, not multi-user sync. libSQL replicas are the supported path.
+
+## Users & permissions
+
+A shared project can name its members and give each one a role. Roles are enforced by
+every bctx surface — the CLI, `bctx studio`, and the MCP server — and every mutation is
+attributed and logged.
+
+```bash
+bctx access init                          # become owner; switch enforcement on
+bctx access user add ana --role writer    # prints a one-paste join code
+bctx project join <code>                  # on ana's machine — stores her key, done
+
+bctx whoami                               # who am I here, and what may I do
+bctx access user ls                       # roles at a glance
+bctx access user update ana --cap "-delete"   # per-user exception to the role
+bctx access key revoke <keyId>            # takes effect at each client's next sync
+bctx access log --deny-only               # what was refused, and to whom
+```
+
+Roles: `owner` and `admin` (everything), `writer` (read/write/delete + files), `reader`
+(read only). `--cap "+x,-y"` layers exceptions over a role. Keys are shown **once**, at
+creation, and stored only as scrypt hashes.
+
+> **This is advisory, not a security boundary.** Clients sync against the libSQL primary
+> directly, so anyone holding the raw database token can bypass these rules with any
+> SQLite client — and the join code contains that token. It gives you roles, attribution,
+> an audit trail, revocation, and protection against mistakes; it does not contain someone
+> who sets out to defeat it. Hand join codes only to people you would trust with full
+> access. Locked out? `bctx access recover --db <file>` works on any store file you can
+> open on disk.
+
+Access control is **off** until you run `bctx access init`, and a project that never opts
+in behaves exactly as it always has.
 
 ## Skills (for agents)
 
