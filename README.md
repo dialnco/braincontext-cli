@@ -1,18 +1,72 @@
 # braincontext-cli
 
-A **local-first** SQLite CLI for saving and retrieving shared **context** across AI
-coding agents (Claude, Codex, Cursor, ...). One local database, one binary: `bctx`.
+**Agent memory that compiles instead of retrieves.** One binary, one local SQLite
+file, no embeddings.
 
-> Status: **v5** — multi-project + online sync + a local **Studio** web UI. See
-> [`progress.md`](./progress.md) for the roadmap.
+```bash
+npm i -g braincontext-cli   # or: pnpm add -g braincontext-cli
+bctx init
+```
 
-## Why
+> **Status.** I built this for myself and use it every day. MIT — take it, fork it,
+> ship it. Issues and PRs are welcome, but I make no promises about support,
+> response times, or roadmap.
 
-Agents constantly re-learn the same project facts. `braincontext` gives them a single,
-portable, local store to **save** durable context (rules, decisions, snippets, notes)
-and **retrieve** it later — over a fast FTS5 search — with full history and soft-delete.
+## Why this exists
 
-## Install (dev)
+Agents re-learn the same facts every session. The usual fix is RAG: embed your
+documents, retrieve the top-k chunks per query, hope the right ones come back.
+
+`bctx` does the opposite. A source is read **once** and digested into durable,
+interlinked pages — so the cross-references are already written, contradictions have
+already been flagged, and the next agent reads a *compiled* answer instead of
+re-deriving one from chunks. Retrieval is FTS5/BM25 plus the link graph.
+
+**No vector store. No embedding API. No similarity threshold to tune.**
+
+The knowledge compounds: every ingest and every answered question leaves the wiki
+better than it found it.
+
+## What is actually different
+
+**No embeddings.** Full-text search (SQLite FTS5/BM25) and typed links. Deterministic,
+offline, free, and debuggable — you can read the query that found a page.
+
+**The link graph *is* the knowledge graph.** `[[Wikilinks]]` become typed edges on
+save. Then query it: `wiki related` for a page's neighbourhood, `wiki path` for how two
+concepts connect structurally, `wiki graph` for hubs and orphans.
+
+**The bookkeeping is the agent's job, not yours.** Updating cross-references, keeping
+summaries current, holding dozens of pages consistent, flagging contradictions — that
+maintenance burden is why humans abandon wikis. Agents don't get bored. `bctx wiki lint`
+surfaces orphans, dangling links, staleness and code drift; the agent fixes them.
+
+**Designed against the token bill.** A disclosure ladder (index line → `--peek` → full
+body), per-page token estimates, `--budget` on the catalog, and surgical edits —
+`wiki patch-section`, `wiki replace`, cell-level table ops — so an agent changing one
+value doesn't re-emit a 2,000-token page.
+
+**Local-first, optionally shared.** A plain file on your disk by default. Take a project
+online (libSQL/Turso) and the same context syncs across your devices or your team, with
+roles, join codes, revocable keys and an audit log.
+
+**One store, every surface.** CLI, an MCP server for Claude/Cursor/Codex, a local Studio
+web UI, and idempotent export to `AGENTS.md` / `CLAUDE.md` / `.cursor/rules` — all over
+the same `core/`, so they cannot drift apart.
+
+## Install
+
+```bash
+npm i -g braincontext-cli
+```
+
+Requires Node >= 22. The store is **libSQL** (`@libsql/client`) — a SQLite-compatible
+engine that works as a plain local file **and** as an embedded replica that syncs with a
+remote primary (see [Projects & online sync](#projects--online-sync)). It ships prebuilt
+binaries, so there is no native compile step.
+
+<details>
+<summary>From source</summary>
 
 ```bash
 pnpm install
@@ -20,10 +74,7 @@ pnpm build
 pnpm link --global     # exposes `bctx` on your PATH
 ```
 
-Requires Node >= 22. The store is **libSQL** (`@libsql/client`) — a SQLite-compatible
-engine that works as a plain local file **and** as an embedded replica that syncs with a
-remote primary (see [Projects & online sync](#projects--online-sync)). It ships prebuilt
-binaries, so there is no native compile step.
+</details>
 
 ## Usage
 

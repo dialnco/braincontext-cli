@@ -15,3 +15,5 @@ coverage/
 
 # local test credentials (Turso creds live in .env.local / env only — never commit)
 test-config.md
+# launch drafts (local only)
+.launch/

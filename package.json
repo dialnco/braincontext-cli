@@ -4,6 +4,15 @@
   "description": "Local-first SQLite CLI for saving and retrieving shared context across AI coding agents (Claude, Codex, Cursor, ...).",
   "type": "module",
   "license": "MIT",
+  "author": "Dial Cortez <dialcortez@gmail.com> (https://github.com/dialnco)",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/dialnco/braincontext-cli.git"
+  },
+  "homepage": "https://github.com/dialnco/braincontext-cli#readme",
+  "bugs": {
+    "url": "https://github.com/dialnco/braincontext-cli/issues"
+  },
   "packageManager": "pnpm@10.9.0",
   "engines": {
     "node": ">=22"
@@ -22,7 +31,15 @@
     "agents",
     "context",
     "memory",
-    "local-first"
+    "local-first",
+    "mcp",
+    "model-context-protocol",
+    "knowledge-base",
+    "wiki",
+    "fts5",
+    "claude-code",
+    "no-embeddings",
+    "libsql"
   ],
   "scripts": {
     "dev": "tsx src/cli.ts",
