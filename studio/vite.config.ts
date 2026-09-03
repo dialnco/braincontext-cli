@@ -24,7 +24,9 @@ export default defineConfig({
     // Vite requires emptyOutDir to clean it.
     outDir: '../dist/studio',
     emptyOutDir: true,
-    sourcemap: true,
+    // Off for the same reason as tsup.config.ts: the map shipped in the npm
+    // tarball and dwarfed the bundle it described.
+    sourcemap: false,
   },
   server: {
     // `pnpm studio:dev` HMR server; proxy same-origin API calls to a running

@@ -17,6 +17,9 @@
   "engines": {
     "node": ">=22"
   },
+  "publishConfig": {
+    "access": "public"
+  },
   "bin": {
     "bctx": "./dist/cli.js"
   },
