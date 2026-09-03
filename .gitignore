@@ -17,3 +17,5 @@ coverage/
 test-config.md
 # launch drafts (local only)
 .launch/
+# personal release runbook (local only)
+RELEASING.local.md
