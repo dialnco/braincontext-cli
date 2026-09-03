@@ -1,0 +1,69 @@
+name: Release
+
+# Publish on a pushed `v*` tag, so the npm version always maps to a commit.
+#   git tag v0.8.0 && git push origin v0.8.0
+#
+# Auth is npm Trusted Publishing (OIDC) — no NPM_TOKEN secret. It must be enabled
+# once at npmjs.com -> braincontext-cli -> Settings -> Trusted Publisher, and the
+# workflow filename registered there must stay `release.yml` to match this file.
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+  id-token: write # OIDC token npm exchanges for a short-lived publish credential
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+
+      # Node 24 ships npm 11.x; trusted publishing needs npm >= 11.5.1, and the
+      # npm 10.9.x bundled with Node 22 is too old. This is the CI toolchain only
+      # — package.json `engines` still allows consumers on Node >= 22.
+      # No dependency cache: a release build should resolve from the lockfile alone.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+
+      - run: pnpm install --frozen-lockfile
+
+      # The tag is the source of truth: refuse to publish if package.json disagrees,
+      # otherwise a mistyped tag silently ships the wrong version.
+      - name: Verify tag matches package.json version
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          pkg="$(node -p "require('./package.json').version")"
+          if [ "$tag" != "$pkg" ]; then
+            echo "Tag $GITHUB_REF_NAME does not match package.json version $pkg" >&2
+            exit 1
+          fi
+
+      - name: Typecheck (CLI)
+        run: pnpm run typecheck
+
+      - name: Typecheck (studio)
+        run: pnpm run typecheck:studio
+
+      - name: Lint
+        run: pnpm run lint
+
+      - name: Test
+        run: pnpm run test
+
+      - name: Build
+        run: pnpm run build
+
+      - name: Check package layout
+        run: pnpm dlx publint
+
+      # npm, not pnpm: OIDC trusted publishing is an npm-cli feature. Provenance is
+      # attested automatically here, so no --provenance flag. prepublishOnly is
+      # skipped because every check it runs already ran above.
+      - name: Publish to npm
+        run: npm publish --ignore-scripts
