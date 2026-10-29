@@ -6,6 +6,7 @@ import { ExportPreview } from '../components/contexts/ExportPreview'
 import { ProjectSwitcher } from '../components/layout/ProjectSwitcher'
 import { TopBar } from '../components/layout/TopBar'
 import { Hov, sx } from '../lib/dc'
+import type { View } from '../state/router'
 import { useApp } from '../state/StoreContext'
 import { useAsync } from '../state/useAsync'
 import { useAutosave } from '../state/useAutosave'
@@ -18,7 +19,7 @@ const KIND_DOT: Record<string, string> = {
   skill: '#cf7d9e',
 }
 
-export function ContextsView({ onNav }: { onNav: (v: 'wiki' | 'contexts' | 'settings') => void }) {
+export function ContextsView({ onNav }: { onNav: (v: View) => void }) {
   const app = useApp()
   const [kind, setKind] = useState<Kind | ''>('')
   const [scope, setScope] = useState<Scope | ''>('')

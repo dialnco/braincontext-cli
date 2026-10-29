@@ -3,6 +3,7 @@ import { ApiError } from '../api/client'
 import { type FileMeta, fileContentUrl, filesApi, type StorageStatus } from '../api/files'
 import { Icon } from '../components/common/Icon'
 import { Hov, sx } from '../lib/dc'
+import type { View } from '../state/router'
 import { useApp } from '../state/StoreContext'
 import { AccessSection } from './AccessSection'
 
@@ -112,7 +113,7 @@ function IdentityBadge() {
  * who can manage them — users and keys. The storage secret is write-only: it is
  * submitted only when the field is non-empty and is never echoed back by the API.
  */
-export function SettingsView({ onNav }: { onNav: (v: 'wiki' | 'contexts' | 'settings') => void }) {
+export function SettingsView({ onNav }: { onNav: (v: View) => void }) {
   const app = useApp()
   const [status, setStatus] = useState<StorageStatus | null>(null)
   const [files, setFiles] = useState<FileMeta[]>([])

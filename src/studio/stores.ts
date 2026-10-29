@@ -1,9 +1,12 @@
 import { mkdirSync } from 'node:fs'
 import { dirname } from 'node:path'
+import type { Client } from '@libsql/client'
 import type { Kysely } from 'kysely'
 import { restrictForSession } from '../core/access/gate'
 import { currentSession } from '../core/access/session'
 import { type DbTarget, openStore, type Store } from '../core/db'
+import { inboxTarget } from '../core/inbox/target'
+import type { InboxStore } from '../core/inbox/threads'
 import { migrateToLatest } from '../core/migrate'
 import { type DbOpts, resolveTarget } from '../core/paths'
 import {
@@ -50,6 +53,12 @@ export interface StoreProvider {
   switch(name: string): Promise<ProjectStatus>
   sync(): Promise<void>
   close(): Promise<void>
+  /**
+   * The inbox connection for the current project — the shared primary, opened on
+   * first use — restricted for the caller like {@link db}. Rejects with an
+   * `unavailable` InboxError on a local project.
+   */
+  inbox(): Promise<InboxStore>
   /** Bracket a data request so a project switch can quiesce before closing the old store. */
   enter(): void
   leave(): void
@@ -106,6 +115,26 @@ export async function createStoreManager(opts: DbOpts): Promise<StoreProvider> {
     }
   }
 
+  // The inbox connection: a direct remote to the primary for a replica (fresh reads,
+  // and never a second syncer of the replica file), the store itself otherwise.
+  let inboxStore: Promise<Store> | null = null
+  const closeInbox = async (): Promise<void> => {
+    const pending = inboxStore
+    inboxStore = null
+    if (pending) await (await pending.catch(() => null))?.close().catch(() => undefined)
+  }
+  const openInbox = async (): Promise<{ db: Kysely<Database>; client: Client }> => {
+    const t = inboxTarget(target) // throws `unavailable` for a local project
+    if (target.mode !== 'replica') return { db: store.db, client: store.client }
+    inboxStore ??= (async () => {
+      const s = openStore(t)
+      await s.prepare()
+      return s
+    })()
+    const s = await inboxStore
+    return { db: s.db, client: s.client }
+  }
+
   const status = (): ProjectStatus => ({
     project: name,
     mode: target.mode,
@@ -126,6 +155,7 @@ export async function createStoreManager(opts: DbOpts): Promise<StoreProvider> {
     // Let in-flight data requests holding the old handle finish first (bounded at 3s so a
     // stuck request can't wedge the switch). The switch route itself is not counted.
     await Promise.race([drain(), new Promise<void>((r) => setTimeout(r, 3000))])
+    await closeInbox()
     await old.close()
     return status()
   }
@@ -142,7 +172,14 @@ export async function createStoreManager(opts: DbOpts): Promise<StoreProvider> {
       return run
     },
     sync: () => store.sync(),
-    close: () => store.close(),
+    close: async () => {
+      await closeInbox()
+      await store.close()
+    },
+    inbox: async () => {
+      const raw = await openInbox()
+      return { db: restrictForSession(raw.db, currentSession()), client: raw.client }
+    },
     enter,
     leave,
   }
@@ -152,8 +189,13 @@ export async function createStoreManager(opts: DbOpts): Promise<StoreProvider> {
  * A fixed-store provider over a pre-opened Kysely handle (tests + `app.request()`).
  * Switching/syncing are no-ops; the caller owns the db lifecycle.
  */
-export function staticProvider(db: Kysely<Database>): StoreProvider {
+export function staticProvider(db: Kysely<Database>, client?: Client): StoreProvider {
   return {
+    inbox: async () => {
+      // A test store stands in for a shared project only when handed its client.
+      if (!client) inboxTarget({ mode: 'local', file: ':test:' })
+      return { db: restrictForSession(db, currentSession()), client: client as Client }
+    },
     db: () => restrictForSession(db, currentSession()),
     status: () => ({ project: 'test', mode: 'local', location: ':test:', noSync: true }),
     projects: () => [{ name: 'test', mode: 'local', current: true }],

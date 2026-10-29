@@ -146,4 +146,47 @@ describe('SEED_TABLES', () => {
     expect(r.rows.map((x) => x.name).sort()).toEqual([...SEED_TABLES].sort())
     await h.close()
   })
+
+  it('lists parents before children, since seeding runs with foreign keys ON', () => {
+    const at = (t: string) => SEED_TABLES.indexOf(t as (typeof SEED_TABLES)[number])
+    expect(at('inbox_threads')).toBeLessThan(at('inbox_messages'))
+    expect(at('contexts')).toBeLessThan(at('context_tags'))
+    expect(at('principals')).toBeLessThan(at('principal_keys'))
+  })
+
+  it('carries inbox threads/messages online with their primary-assigned order', async () => {
+    const local = await fileDb(join(dir, 'inbox-local.db'))
+    const remote = await fileDb(join(dir, 'inbox-remote.db'))
+    const at = new Date().toISOString()
+    await local.db
+      .insertInto('inbox_threads')
+      .values({
+        id: 'T1',
+        kind: 'task',
+        title: 't',
+        status: 'open',
+        urgent: 0,
+        from_principal_id: 'p1',
+        from_handle: 'a',
+        refs: '[]',
+        last_seq: 7,
+        agent_turns: 0,
+        created_at: at,
+        updated_at: at,
+      } as never)
+      .execute()
+    await sql`INSERT INTO inbox_messages (seq, id, thread_id, author_principal_id, author_handle, surface, type, body, created_at)
+              VALUES (7, 'M7', 'T1', 'p1', 'a', 'cli', 'message', 'hi', ${at})`.execute(local.db)
+    const counts = await seedDatabase(local.db, remote.db)
+    expect(counts.inbox_messages).toBe(1)
+    // AUTOINCREMENT continues past the seeded seq, so ordering survives going online.
+    await sql`INSERT INTO inbox_messages (id, thread_id, author_principal_id, author_handle, surface, type, body, created_at)
+              VALUES ('M8', 'T1', 'p1', 'a', 'cli', 'message', 'next', ${at})`.execute(remote.db)
+    const seqs = await sql<{ seq: number }>`SELECT seq FROM inbox_messages ORDER BY seq`.execute(
+      remote.db,
+    )
+    expect(seqs.rows.map((r) => r.seq)).toEqual([7, 8])
+    await local.close()
+    await remote.close()
+  })
 })

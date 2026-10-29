@@ -21,7 +21,7 @@ import { WikiEditor, type WikiEditorHandle } from '../editor/WikiEditor'
 import { Hov, sx } from '../lib/dc'
 import { freshnessColor, pageFreshness } from '../lib/freshness'
 import { GRAPH_NODE_CAP } from '../lib/graph'
-import { pageHref, useRoute } from '../state/router'
+import { pageHref, useRoute, type View } from '../state/router'
 import { useApp } from '../state/StoreContext'
 import { useAsync } from '../state/useAsync'
 
@@ -34,7 +34,7 @@ interface Detail {
   history: HistoryEntry[]
 }
 
-export function WikiView({ onNav }: { onNav: (v: 'wiki' | 'contexts' | 'settings') => void }) {
+export function WikiView({ onNav }: { onNav: (v: View) => void }) {
   const app = useApp()
   const route = useRoute()
   const editorRef = useRef<WikiEditorHandle | null>(null)

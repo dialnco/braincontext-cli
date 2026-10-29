@@ -1,10 +1,12 @@
 import { mkdirSync } from 'node:fs'
 import { dirname } from 'node:path'
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
+import { ulid } from 'ulidx'
 import { createSessionResolver } from '../core/access/cache'
 import { restrictForSession } from '../core/access/gate'
 import { describeFailure } from '../core/access/session'
-import { openStore } from '../core/db'
+import { openStore, type Store } from '../core/db'
+import { inboxLocalAllowed, inboxTarget } from '../core/inbox/target'
 import { migrateToLatest } from '../core/migrate'
 import { type DbOpts, resolveTarget } from '../core/paths'
 import { resolveAccessKey } from '../core/registry'
@@ -35,7 +37,27 @@ export async function runMcpStdio(opts: DbOpts): Promise<void> {
     store.db,
     initial.enabled && initial.ok ? initial.session : null,
   )
-  const server = buildServer(gatedDb, { db: store.db, session })
+  // The inbox talks to the shared primary, never this replica file: messages must be
+  // fresh, and the replica's own sync stays the only syncer of that file. Opened on
+  // first use so a server that never touches the inbox never makes the connection.
+  let inboxStore: Promise<Store> | null = null
+  const inboxDeps =
+    target.mode === 'local' && !inboxLocalAllowed()
+      ? undefined
+      : {
+          session: `mcp-${ulid()}`,
+          store: async () => {
+            if (target.mode !== 'replica') return { db: store.db, client: store.client }
+            inboxStore ??= (async () => {
+              const s = openStore(inboxTarget(target))
+              await s.prepare()
+              return s
+            })()
+            const s = await inboxStore
+            return { db: s.db, client: s.client }
+          },
+        }
+  const server = buildServer(gatedDb, { db: store.db, session }, { inbox: inboxDeps })
 
   if (initial.enabled) {
     // stderr, so an agent operator can see why its tools are refusing. The server
@@ -53,6 +75,7 @@ export async function runMcpStdio(opts: DbOpts): Promise<void> {
     if (closing) return
     closing = true
     try {
+      if (inboxStore) await (await inboxStore).close().catch(() => undefined)
       await store.close()
     } finally {
       process.exit(0)

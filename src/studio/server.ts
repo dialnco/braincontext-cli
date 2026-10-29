@@ -10,6 +10,7 @@ import { contextsRoutes } from './routes/contexts'
 import { exportRoutes } from './routes/export'
 import { filesRoutes } from './routes/files'
 import { healthRoutes } from './routes/health'
+import { inboxRoutes } from './routes/inbox'
 import { projectsRoutes } from './routes/projects'
 import { tagsRoutes } from './routes/tags'
 import { wikiRoutes } from './routes/wiki'
@@ -135,6 +136,7 @@ export function buildStudioApp(provider: StoreProvider, opts: StudioAppOpts): Ho
   app.route('/api/tags', tagsRoutes(provider))
   app.route('/api/export', exportRoutes(provider))
   app.route('/api/files', filesRoutes(provider, opts.filesStoreFactory))
+  app.route('/api/inbox', inboxRoutes(provider))
   // Keep the API namespace honest: an unknown /api/* is a JSON 404, never the SPA shell.
   app.all('/api/*', (c) => c.json({ error: 'not found' }, 404))
 

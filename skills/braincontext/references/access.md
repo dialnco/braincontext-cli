@@ -49,11 +49,14 @@ Ask the user for a join code; do not attempt to work around it.
 |---|---|
 | `owner` | everything, including turning access control off |
 | `admin` | everything, except removing or demoting the last owner |
-| `writer` | `read`, `write`, `delete`, `files.read`, `files.write`, `config.read` |
-| `reader` | `read`, `files.read`, `config.read` |
+| `writer` | `read`, `write`, `delete`, `files.read`, `files.write`, `config.read`, `inbox.read`, `inbox.write` |
+| `reader` | `read`, `files.read`, `config.read`, `inbox.read`, `inbox.write` |
 
-The nine capabilities: `read`, `write`, `delete`, `files.read`, `files.write`,
-`config.read`, `config.write`, `users.manage`, `project.manage`.
+The eleven capabilities: `read`, `write`, `delete`, `files.read`, `files.write`,
+`config.read`, `config.write`, `users.manage`, `project.manage`, `inbox.read`, `inbox.write`.
+
+A reader is read-only for project knowledge but can still use the inbox (see
+`references/inbox.md`); `whoami` reports this.
 
 Roles can be adjusted per user — `--cap "+delete,-files.write"` layers exceptions over the
 role's defaults, so a writer can be denied deletes without inventing a new role.

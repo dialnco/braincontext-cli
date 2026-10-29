@@ -6,6 +6,7 @@ import { exportCommand } from './commands/export'
 import { fileCommand } from './commands/file'
 import { getCommand } from './commands/get'
 import { importCommand } from './commands/import'
+import { inboxCommand } from './commands/inbox'
 import { initCommand } from './commands/init'
 import { listCommand } from './commands/list'
 import { mcpCommand } from './commands/mcp'
@@ -53,6 +54,8 @@ export function buildProgram(): Command {
   // Users, keys, and the access log for a shared project.
   program.addCommand(accessCommand())
   program.addCommand(whoamiCommand())
+  // Member-to-member requests, questions, and tasks (shared projects only).
+  program.addCommand(inboxCommand())
   // Preferred workflow first.
   program.addCommand(wikiCommand())
   // Direct context operations (individual entries).
@@ -104,6 +107,12 @@ Adding people — issue a join code, don't share the url/token (advisory; see
   $ bctx project join <code>                   # on ana's machine — ONE command, connection
                                                # included; no \`project link\` needed first
   $ bctx whoami   ·   bctx access user ls   ·   bctx access log --deny-only
+
+Inbox — ask, hand off, and converse between members (shared projects):
+  $ bctx inbox send @ana --kind ask "Does /v2/billing validate RUT yet?"
+  $ bctx inbox                      ·   bctx inbox show 42   ·   bctx inbox reply 42 --resolve "Yes"
+  $ bctx inbox wait --thread 42 --since 815     # background: wakes when the answer lands
+  $ bctx inbox hook install --claude            # Claude Code sees new items automatically
 
 Wiki pages are hidden from plain list/search (use --include-wiki to include them).
 Store precedence: --db/BCTX_DB > --global/--local > --project/BCTX_PROJECT >

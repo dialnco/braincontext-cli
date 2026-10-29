@@ -228,10 +228,16 @@ export async function updatePrincipal(
   }
   await assertMayModify(db, actor, target, { role: patch.role, status: patch.status })
 
+  // The raw column, so overrides this version doesn't know survive the rewrite.
+  const raw = await db
+    .selectFrom('principals')
+    .select('capabilities')
+    .where('id', '=', target.id)
+    .executeTakeFirst()
   const next = {
     role: patch.role ?? target.role,
     display_name: patch.displayName === undefined ? target.displayName : patch.displayName,
-    capabilities: serializeOverrides(patch.overrides ?? target.overrides),
+    capabilities: serializeOverrides(patch.overrides ?? target.overrides, raw?.capabilities),
     status: patch.status ?? target.status,
     updated_at: new Date().toISOString(),
   }

@@ -1,8 +1,9 @@
 import type { ProjectStatus } from '../../api/types'
 import { Hov, sx } from '../../lib/dc'
+import type { View } from '../../state/router'
+import { useApp } from '../../state/StoreContext'
 import { Icon } from '../common/Icon'
 
-type View = 'wiki' | 'contexts' | 'settings'
 type Layout = 'three' | 'focus' | 'dual'
 
 interface Props {
@@ -28,6 +29,13 @@ interface Props {
 
 export function TopBar(props: Props) {
   const { project, view } = props
+  const app = useApp()
+  // The tab shows wherever the member may read the inbox; on a project where the
+  // inbox is unavailable it only shows for an owner (who can turn it on).
+  const showInbox =
+    app.can('inbox.read') &&
+    (app.inbox.info?.available === true || app.auth?.identity?.role === 'owner')
+  const unread = app.inbox.unread ?? 0
   const glyph = (project?.project ?? '·').charAt(0).toUpperCase()
   const seg = (on: boolean) =>
     `padding:4px 13px;border-radius:6px;cursor:pointer;font:500 12.5px 'IBM Plex Sans';color:${on ? '#fff' : 'var(--ink-soft)'};background:${on ? 'var(--accent)' : 'transparent'};`
@@ -85,6 +93,25 @@ export function TopBar(props: Props) {
         <div onClick={() => props.onNav('contexts')} style={sx(navTab(view === 'contexts'))}>
           Contexts
         </div>
+        {showInbox && (
+          <div
+            onClick={() => props.onNav('inbox')}
+            style={sx(`${navTab(view === 'inbox')}display:flex;align-items:center;gap:6px;`)}
+            title={unread ? `${unread} unread` : 'Inbox'}
+          >
+            Inbox
+            {unread > 0 && (
+              <span
+                data-inbox-badge
+                style={sx(
+                  "font:600 10px 'IBM Plex Mono';border-radius:8px;padding:0 6px;background:var(--accent);color:#fff;",
+                )}
+              >
+                {unread}
+              </span>
+            )}
+          </div>
+        )}
       </div>
 
       <Hov

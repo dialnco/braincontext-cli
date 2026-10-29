@@ -5,6 +5,7 @@ import { LibsqlDialect } from '@libsql/kysely-libsql'
 import { Kysely, sql } from 'kysely'
 import { enterGate } from './access/gate'
 import { runWithSession, type SessionResult } from './access/session'
+import { inboxTarget } from './inbox/target'
 import { migrateToLatest } from './migrate'
 import { type DbOpts, resolveTarget } from './paths'
 import { resolveAccessKey } from './registry'
@@ -96,8 +97,11 @@ export function openStore(t: DbTarget): Store {
       // WAL lets readers proceed without blocking the single writer; it is a
       // file-header-persistent mode, so setting it once sticks across reconnects.
       if (isFile) await sql`PRAGMA journal_mode = WAL`.execute(db)
-      // libSQL defaults foreign_keys OFF — enforce referential integrity.
-      await sql`PRAGMA foreign_keys = ON`.execute(db)
+      // libSQL defaults foreign_keys OFF — enforce referential integrity. Skipped
+      // for a remote connection: over HTTP each request runs on its own stream, so
+      // the pragma would not carry to the next statement — it would only cost a
+      // round trip.
+      if (isFile) await sql`PRAGMA foreign_keys = ON`.execute(db)
     },
     sync: async () => {
       if (t.mode === 'replica') await client.sync()
@@ -132,11 +136,17 @@ export async function dataVersion(db: Kysely<Database>): Promise<number> {
  * session, and runs inside `runWithSession` so writes downstream can attribute
  * themselves without threading an actor argument through core/.
  */
+export interface WithDbContext {
+  target: DbTarget
+  /** The raw libSQL client under `db` (atomic batches — see core/inbox). */
+  client: Client
+}
+
 export async function withDb<T>(
   opts: DbOpts,
-  fn: (db: Kysely<Database>, access: SessionResult) => Promise<T>,
+  fn: (db: Kysely<Database>, access: SessionResult, ctx: WithDbContext) => Promise<T>,
 ): Promise<T> {
-  const target = resolveTarget(opts)
+  const target = opts.inbox ? inboxTarget(resolveTarget(opts)) : resolveTarget(opts)
   if (target.mode !== 'remote') mkdirSync(dirname(target.file), { recursive: true })
   const store = openStore(target)
   try {
@@ -151,7 +161,9 @@ export async function withDb<T>(
       action: opts.action ?? 'cli',
       surface: 'cli',
     })
-    const result = await runWithSession(gate.session, () => fn(gate.db, gate.result))
+    const result = await runWithSession(gate.session, () =>
+      fn(gate.db, gate.result, { target, client: store.client }),
+    )
     if (!opts.noSync) await store.sync()
     return result
   } finally {

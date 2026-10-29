@@ -1,10 +1,11 @@
 import type { Kysely } from 'kysely'
 import { resolveAgent } from '../../lib/agent'
+import { shareWriteChain } from '../tx'
 import type { Database } from '../types'
 import { logAccess, type Surface } from './audit'
 import type { Capability } from './capabilities'
 import type { CommandCapability } from './commands'
-import { readOnlyPlugin } from './readonly'
+import { createReadOnlyPlugin } from './readonly'
 import {
   type AccessSession,
   requireCapability,
@@ -95,11 +96,27 @@ export async function authorize(
   }
 }
 
-/** One read-only wrapper per underlying handle — `db()` is called per request. */
-const readOnlyHandles = new WeakMap<Kysely<Database>, Kysely<Database>>()
+/**
+ * Tables a read-only principal may still write when it holds `inbox.write`: the
+ * inbox is conversation, not project knowledge, so a reader can ask and answer.
+ */
+export const INBOX_TABLES: ReadonlySet<string> = new Set([
+  'inbox_threads',
+  'inbox_messages',
+  'inbox_reads',
+])
 
 /**
- * Wrap a handle so an authenticated read-only principal physically cannot write.
+ * One read-only wrapper per (underlying handle, writable-table set) — `db()` is
+ * called per request. Keyed on the set too: Studio serves several principals over
+ * one handle, and a muted reader must not be handed an inbox-writable wrapper that
+ * was built for someone else (or vice versa).
+ */
+const readOnlyHandles = new WeakMap<Kysely<Database>, Map<string, Kysely<Database>>>()
+
+/**
+ * Wrap a handle so an authenticated read-only principal physically cannot write
+ * project knowledge.
  *
  * Only an AUTHENTICATED read-only principal gets it. An unauthenticated caller is
  * already blocked by the capability check; wrapping it too would break
@@ -111,10 +128,19 @@ export function restrictForSession(
   session: AccessSession | null | undefined,
 ): Kysely<Database> {
   if (!session?.readOnly) return db
-  const cached = readOnlyHandles.get(db)
+  const writable = session.can('inbox.write') ? INBOX_TABLES : new Set<string>()
+  const cacheKey = [...writable].sort().join(',')
+  let perDb = readOnlyHandles.get(db)
+  if (!perDb) {
+    perDb = new Map()
+    readOnlyHandles.set(db, perDb)
+  }
+  const cached = perDb.get(cacheKey)
   if (cached) return cached
-  const wrapped = db.withPlugin(readOnlyPlugin)
-  readOnlyHandles.set(db, wrapped)
+  const wrapped = db.withPlugin(createReadOnlyPlugin(writable))
+  // Same client underneath: its writes must queue behind the raw handle's (audit rows).
+  shareWriteChain(wrapped, db)
+  perDb.set(cacheKey, wrapped)
   return wrapped
 }
 

@@ -28,6 +28,10 @@ export const SEED_TABLES = [
   'principals',
   'principal_keys',
   'access_log',
+  // Parents before children: seeding runs with foreign keys ON.
+  'inbox_threads',
+  'inbox_messages',
+  'inbox_reads',
 ] as const
 
 function ident(name: string): string {

@@ -250,6 +250,72 @@ export interface AccessLogTable {
   detail: string | null
 }
 
+// ---------------------------------------------------------------------------
+// Inbox (see 0005 and core/inbox/). Only usable on a shared, access-controlled project.
+// ---------------------------------------------------------------------------
+
+/** What a thread asks of its assignee. */
+export const INBOX_KINDS = ['ask', 'task', 'fyi'] as const
+export type InboxKind = (typeof INBOX_KINDS)[number]
+
+export const INBOX_STATUSES = ['open', 'in_progress', 'resolved', 'declined', 'cancelled'] as const
+export type InboxStatus = (typeof INBOX_STATUSES)[number]
+
+export interface InboxThreadsTable {
+  /** Short public reference (`#42`), assigned by the database that runs the insert. */
+  num: Generated<number>
+  id: string
+  kind: InboxKind
+  title: string
+  status: InboxStatus
+  urgent: number
+  from_principal_id: string
+  from_handle: string
+  from_session: string | null
+  /** NULL = the team pool: unassigned until someone claims it. */
+  assignee_principal_id: string | null
+  assignee_handle: string | null
+  claimed_session: string | null
+  claimed_agent: string | null
+  claimed_at: string | null
+  resolution: string | null
+  closed_by_principal_id: string | null
+  closed_by_handle: string | null
+  closed_at: string | null
+  /** JSON `[{type, id}]` — ids only, resolved by the reader through gated routes. */
+  refs: string
+  last_seq: number
+  last_author_principal_id: string | null
+  /** Consecutive agent-authored messages since the last human one (loop guard). */
+  agent_turns: number
+  created_at: string
+  updated_at: string
+}
+
+export interface InboxMessagesTable {
+  /** Global total order (primary-assigned); the `wait` cursor. */
+  seq: Generated<number>
+  id: string
+  thread_id: string
+  author_principal_id: string
+  author_handle: string
+  author_session: string | null
+  /** Self-reported tool label — display only, never authorization. */
+  agent_source: string | null
+  surface: 'cli' | 'mcp' | 'studio'
+  by_agent: number
+  type: 'message' | 'event'
+  event: string | null
+  body: string
+  created_at: string
+}
+
+export interface InboxReadsTable {
+  principal_id: string
+  thread_id: string
+  last_read_seq: number
+}
+
 export interface Database {
   contexts: ContextsTable
   tags: TagsTable
@@ -265,4 +331,7 @@ export interface Database {
   principals: PrincipalsTable
   principal_keys: PrincipalKeysTable
   access_log: AccessLogTable
+  inbox_threads: InboxThreadsTable
+  inbox_messages: InboxMessagesTable
+  inbox_reads: InboxReadsTable
 }

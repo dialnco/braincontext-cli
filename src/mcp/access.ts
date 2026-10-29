@@ -60,6 +60,14 @@ export const MCP_TOOL_CAPABILITIES: Record<string, Capability | null> = {
   wiki_table_add_column: 'write',
   wiki_table_delete_column: 'write',
   wiki_table_rename_column: 'write',
+
+  // Inbox (member-to-member threads; shared projects only).
+  inbox_list: 'inbox.read',
+  inbox_get: 'inbox.read',
+  inbox_send: 'inbox.write',
+  inbox_reply: 'inbox.write',
+  // `mark_read` rides along here: it is bookkeeping, but the tool also changes state.
+  inbox_set: 'inbox.write',
 }
 
 export interface McpAccessContext {

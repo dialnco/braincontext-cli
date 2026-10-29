@@ -24,6 +24,13 @@ export const CAPABILITIES = [
   'users.manage',
   /** Go online, link, disconnect, enable/disable access control. */
   'project.manage',
+  /** See inbox threads (requests, questions, tasks between members). */
+  'inbox.read',
+  /**
+   * Send, reply to, claim, and close inbox threads. Not a knowledge write: a reader
+   * holding it stays read-only for contexts and pages (see restrictForSession).
+   */
+  'inbox.write',
 ] as const
 
 export type Capability = (typeof CAPABILITIES)[number]
@@ -40,8 +47,18 @@ const ALL = [...CAPABILITIES]
 export const ROLE_CAPABILITIES: Record<Role, readonly Capability[]> = {
   owner: ALL,
   admin: ALL,
-  writer: ['read', 'write', 'delete', 'files.read', 'files.write', 'config.read'],
-  reader: ['read', 'files.read', 'config.read'],
+  writer: [
+    'read',
+    'write',
+    'delete',
+    'files.read',
+    'files.write',
+    'config.read',
+    'inbox.read',
+    'inbox.write',
+  ],
+  // A reader is still a member: it may ask and answer in the inbox.
+  reader: ['read', 'files.read', 'config.read', 'inbox.read', 'inbox.write'],
 }
 
 /** Per-capability overrides layered over the role defaults. */
@@ -85,10 +102,37 @@ export function parseOverrides(raw: string | null): CapabilityOverrides {
   }
 }
 
-/** Serialize overrides for storage; an empty set becomes NULL, not `{}`. */
-export function serializeOverrides(overrides: CapabilityOverrides): string | null {
-  const entries = Object.entries(overrides).filter(([k]) => isCapability(k))
+/**
+ * Serialize overrides for storage; an empty set becomes NULL, not `{}`.
+ *
+ * `preserveFrom` is the row's previous raw JSON: any boolean entry under a key this
+ * version does not recognize is carried over untouched. A capability added by a
+ * NEWER bctx (say, a mute on a future capability) must survive an edit made from
+ * this one — dropping it would silently re-grant what an admin had denied.
+ */
+export function serializeOverrides(
+  overrides: CapabilityOverrides,
+  preserveFrom?: string | null,
+): string | null {
+  const entries: [string, boolean][] = Object.entries(overrides).filter(
+    (e): e is [string, boolean] => isCapability(e[0]) && typeof e[1] === 'boolean',
+  )
+  for (const [k, v] of Object.entries(parseRawOverrides(preserveFrom))) {
+    if (!isCapability(k) && typeof v === 'boolean') entries.push([k, v])
+  }
   return entries.length ? JSON.stringify(Object.fromEntries(entries)) : null
+}
+
+function parseRawOverrides(raw: string | null | undefined): Record<string, unknown> {
+  if (!raw) return {}
+  try {
+    const parsed: unknown = JSON.parse(raw)
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+      ? (parsed as Record<string, unknown>)
+      : {}
+  } catch {
+    return {}
+  }
 }
 
 /**

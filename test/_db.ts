@@ -1,7 +1,7 @@
 import { mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { createClient } from '@libsql/client'
+import { type Client, createClient } from '@libsql/client'
 import { type Kysely, sql } from 'kysely'
 import { kyselyFor } from '../src/core/db'
 import { migrateToLatest } from '../src/core/migrate'
@@ -23,4 +23,14 @@ export async function freshDb(): Promise<Kysely<Database>> {
   await sql`PRAGMA foreign_keys = ON`.execute(db)
   await migrateToLatest(db)
   return db
+}
+
+/** Like {@link freshDb}, plus the raw client (the inbox writes through `client.batch`). */
+export async function freshStore(): Promise<{ db: Kysely<Database>; client: Client }> {
+  const dir = mkdtempSync(join(tmpdir(), 'bctx-test-'))
+  const client = createClient({ url: `file:${join(dir, 'test.db')}` })
+  const db = kyselyFor(client)
+  await sql`PRAGMA foreign_keys = ON`.execute(db)
+  await migrateToLatest(db)
+  return { db, client }
 }

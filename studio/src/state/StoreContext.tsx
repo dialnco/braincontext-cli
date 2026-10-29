@@ -2,6 +2,7 @@ import type React from 'react'
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react'
 import { type AuthState, authApi, type Capability } from '../api/access'
 import { ApiError, api } from '../api/client'
+import { type InboxStatusInfo, inboxApi } from '../api/inbox'
 import { projectsApi } from '../api/projects'
 import type { ProjectInfo, ProjectStatus } from '../api/types'
 import type { ThemeName } from '../lib/theme'
@@ -49,6 +50,13 @@ interface AppState {
    * — the server refuses the request either way.
    */
   can: (capability: Capability) => boolean
+  /**
+   * Inbox availability + this member's unread count (null until known). Polled on
+   * its own timer — also while the tab is hidden, so the tab title can announce new
+   * items — and kept out of the global `rev` refresh.
+   */
+  inbox: { info: InboxStatusInfo | null; unread: number | null }
+  refreshInbox: () => void
 }
 
 const Ctx = createContext<AppState | null>(null)
@@ -68,6 +76,10 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
   const [toastMsg, setToastMsg] = useState<string | null>(null)
   const [auth, setAuth] = useState<AuthState | null>(null)
   const [promptLogin, setPromptLogin] = useState(false)
+  const [inboxInfo, setInboxInfo] = useState<InboxStatusInfo | null>(null)
+  const [inboxUnread, setInboxUnread] = useState<number | null>(null)
+  const [inboxNonce, setInboxNonce] = useState(0)
+  const refreshInbox = useCallback(() => setInboxNonce((n) => n + 1), [])
 
   const toggleTheme = useCallback(() => {
     setTheme((t) => {
@@ -223,6 +235,40 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
     return () => window.clearInterval(id)
   }, [bump])
 
+  // Inbox: re-check availability whenever the project or identity changes, then poll
+  // the unread count — every 20s while visible, every 60s while hidden.
+  const projectName = project?.project ?? null
+  const identity = auth?.identity?.handle ?? null
+  // biome-ignore lint/correctness/useExhaustiveDependencies: re-check on project/identity change
+  useEffect(() => {
+    let live = true
+    let timer: number | undefined
+    const tick = async () => {
+      try {
+        const info = await inboxApi.status()
+        if (!live) return
+        setInboxInfo(info)
+        if (info.available) {
+          const s = await inboxApi.summary()
+          if (live) setInboxUnread(s.unread)
+        } else setInboxUnread(null)
+      } catch {
+        // Transient (switch/restart) — keep the last answer; the next tick corrects it.
+      }
+      if (live) timer = window.setTimeout(tick, document.hidden ? 60_000 : 20_000)
+    }
+    void tick()
+    return () => {
+      live = false
+      window.clearTimeout(timer)
+    }
+  }, [projectName, identity, inboxNonce])
+
+  useEffect(() => {
+    const base = document.title.replace(/^\(\d+\)\s*/, '')
+    document.title = inboxUnread ? `(${inboxUnread}) ${base}` : base
+  }, [inboxUnread])
+
   const value = useMemo<AppState>(
     () => ({
       theme,
@@ -245,6 +291,8 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
       promptLogin,
       beginSwitchIdentity,
       cancelSwitchIdentity,
+      inbox: { info: inboxInfo, unread: inboxUnread },
+      refreshInbox,
     }),
     [
       theme,
@@ -267,6 +315,9 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
       promptLogin,
       beginSwitchIdentity,
       cancelSwitchIdentity,
+      inboxInfo,
+      inboxUnread,
+      refreshInbox,
     ],
   )
 

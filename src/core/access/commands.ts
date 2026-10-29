@@ -68,6 +68,28 @@ export const COMMAND_CAPABILITIES: Record<string, CommandCapability> = {
   'access key ls': 'users.manage',
   'access key revoke': 'users.manage',
 
+  // Inbox. Every one runs against the shared primary (see core/inbox/target.ts).
+  'inbox ls': 'inbox.read',
+  'inbox show': 'inbox.read',
+  'inbox wait': 'inbox.read',
+  'inbox members': 'inbox.read',
+  // Read markers are personal bookkeeping, not a message: reading is enough.
+  'inbox read': 'inbox.read',
+  // Showing the limits needs inbox.read; changing them checks config.write inside.
+  'inbox settings': 'inbox.read',
+  'inbox send': 'inbox.write',
+  'inbox reply': 'inbox.write',
+  'inbox claim': 'inbox.write',
+  'inbox unclaim': 'inbox.write',
+  'inbox resolve': 'inbox.write',
+  'inbox decline': 'inbox.write',
+  'inbox reopen': 'inbox.write',
+  'inbox cancel': 'inbox.write',
+  'inbox reassign': 'inbox.write',
+  // Agent hook: must never fail a prompt, so it is ungated here and authenticates
+  // (inbox.read) inside its own background refresh; `install` only edits a local file.
+  'inbox hook': null,
+
   // Wiki — reads.
   'wiki get': 'read',
   'wiki show': 'read',

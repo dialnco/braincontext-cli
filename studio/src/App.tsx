@@ -1,8 +1,9 @@
 import type React from 'react'
 import { DARK, LIGHT } from './lib/theme'
-import { useRoute } from './state/router'
+import { useRoute, type View } from './state/router'
 import { StoreProvider, useApp } from './state/StoreContext'
 import { ContextsView } from './views/ContextsView'
+import { InboxView } from './views/InboxView'
 import { LoginView } from './views/LoginView'
 import { SettingsView } from './views/SettingsView'
 import { WikiView } from './views/WikiView'
@@ -16,10 +17,10 @@ import './styles/studio.css'
 function Shell() {
   const app = useApp()
   const route = useRoute()
-  const view =
-    route.parts[0] === 'contexts' ? 'contexts' : route.parts[0] === 'settings' ? 'settings' : 'wiki'
-  const onNav = (v: 'wiki' | 'contexts' | 'settings') =>
-    route.navigate(v === 'contexts' ? '/contexts' : v === 'settings' ? '/settings' : '/')
+  const first = route.parts[0]
+  const view: View =
+    first === 'contexts' || first === 'settings' || first === 'inbox' ? first : 'wiki'
+  const onNav = (v: View) => route.navigate(v === 'wiki' ? '/' : `/${v}`)
 
   const vars = {
     ...(app.theme === 'dark' ? DARK : LIGHT),
@@ -46,6 +47,8 @@ function Shell() {
           <LoginView message={app.auth?.message} />
         ) : view === 'contexts' ? (
           <ContextsView onNav={onNav} />
+        ) : view === 'inbox' ? (
+          <InboxView onNav={onNav} />
         ) : view === 'settings' ? (
           <SettingsView onNav={onNav} />
         ) : (

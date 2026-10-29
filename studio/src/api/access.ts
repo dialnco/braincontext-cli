@@ -17,6 +17,8 @@ export type Capability =
   | 'config.write'
   | 'users.manage'
   | 'project.manage'
+  | 'inbox.read'
+  | 'inbox.write'
 
 export type Role = 'owner' | 'admin' | 'writer' | 'reader'
 

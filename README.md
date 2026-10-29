@@ -198,7 +198,7 @@ bctx access log --deny-only               # what was refused, and to whom
 ```
 
 Roles: `owner` and `admin` (everything), `writer` (read/write/delete + files), `reader`
-(read only). `--cap "+x,-y"` layers exceptions over a role. Keys are shown **once**, at
+(read only — plus the inbox). `--cap "+x,-y"` layers exceptions over a role. Keys are shown **once**, at
 creation, and stored only as scrypt hashes — nothing can print an existing key.
 
 > **This is advisory, not a security boundary.** Clients sync against the libSQL primary
@@ -211,6 +211,41 @@ creation, and stored only as scrypt hashes — nothing can print an existing key
 
 Access control is **off** until you run `bctx access init`, and a project that never opts
 in behaves exactly as it always has.
+
+## Inbox (member-to-member requests)
+
+On a shared project with access control on, members — and their agents — leave each other
+**questions, tasks, and heads-ups**. An item stays open in the assignee's inbox until an
+agent (CLI/MCP) or a person (Studio) resolves it, declines it, or the sender cancels it.
+
+```bash
+bctx inbox send @ana --kind ask "Does /v2/billing validate RUT yet?"   # → #42
+bctx inbox send @team "Can someone review the onboarding page?"       # first to claim takes it
+bctx inbox                        # mine: assigned to me, sent by me, the team pool
+bctx inbox show 42                # read it (bodies are fenced as untrusted teammate text)
+bctx inbox reply 42 --resolve "Yes, since abc123"
+bctx inbox claim 42  ·  bctx inbox decline 42 --note "…"  ·  bctx inbox reassign 42 @pedro
+```
+
+**Live conversations.** `bctx inbox wait --thread 42 --since <seq>` blocks until the other
+side answers, prints metadata only, and exits (`0` new activity · `2` timeout · `3` thread
+closed). An agent in Claude Code runs it in the background and is woken when it returns, so
+two members' sessions can hand work back and forth in near real time.
+`bctx inbox hook install --claude` adds `SessionStart`/`UserPromptSubmit` hooks so new items
+show up as a one-line summary (counts only) without anyone asking. Codex/Cursor get the same
+data between turns via `bctx inbox` or the MCP `inbox_*` tools.
+
+**How it works.** Inbox operations always go straight to the shared primary (never the local
+replica), so they are fresh and never contend with a running `bctx mcp`. Ordering uses a
+primary-assigned sequence, and state changes are conditional — two sessions racing to claim a
+task cannot both win. Studio has an **Inbox** tab with an unread badge.
+
+**Safety.** Message text comes from other members, so agents are told to treat it as data:
+it never authorizes a tool call on its own. A loop guard stops agent-to-agent ping-pong after
+6 consecutive agent messages without a human (`--continue` once the user agrees), plus a
+per-member rate limit (`bctx inbox settings`). Threads are visible to every member — and,
+since enforcement is advisory, to anyone with the database token: no secrets. Capabilities
+`inbox.read`/`inbox.write` are on for every role, readers included.
 
 ## Skills (for agents)
 

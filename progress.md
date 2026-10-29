@@ -2,6 +2,63 @@
 
 Tracking project progress across milestones. Update as work lands.
 
+## Inbox — member-to-member requests, tasks & conversations (shipped 2026-10-29)
+
+On a shared, access-controlled project, members (and their agents) send each other
+`ask` / `task` / `fyi` threads, addressed to `@member` or the `@team` pool; a thread stays
+open until resolved / declined / cancelled. Designed, then put through three independent
+critiques (data/sync, security, agent UX) before building — the decisions below came out
+of that round.
+
+- [x] **Schema** — migration `0005_inbox`: `inbox_threads` (`num` short ref), append-only
+      `inbox_messages` (`seq` = primary-assigned global order, the `wait` cursor; status
+      changes are `type='event'` rows), `inbox_reads` (read state kept APART from any right to
+      act). Handles denormalized, lookups always by principal id. Added to `SEED_TABLES`
+      (parents first — seeding runs with FKs on; order now asserted).
+- [x] **Always the primary** — CLI (`DbOpts.inbox` → `inboxTarget`), MCP and Studio open a
+      direct remote connection for the inbox instead of reading the replica: messaging can't
+      be stale (joined replicas have no `syncInterval` by default) and it never becomes a
+      second syncer of the replica file. Writes are ONE `client.batch` (compiled through the
+      possibly read-only handle, so the plugin still inspects them); transitions are
+      conditional `UPDATE`s with the event inserted `WHERE changes() = 1` — verified on Turso
+      that two racing claims yield one winner and one event.
+- [x] **Session ≠ member** — `BCTX_SESSION` (exported by the Claude Code SessionStart hook via
+      `CLAUDE_ENV_FILE`), one id per MCP process, a hashed id per Studio browser. Claims and
+      `wait` use it, so a member's sessions don't collide and self-sent todos wake the others.
+- [x] **Permissions** — `inbox.read` / `inbox.write` on for all roles incl. reader. The
+      read-only plugin now takes `writableTables` (a reader may write `inbox_*` only; raw-SQL
+      writes, merges and CTEs still refused); its cache is keyed by the table set. Actor rules
+      live in core. `whoami` reports inbox access.
+- [x] **Agent safety** — bodies are fenced with a per-response nonce and defused, control
+      chars stripped (titles too — a test caught it); hooks / `wait` / status carry metadata
+      only. Agent-turn guard (6 consecutive agent messages → "ask your user", `--continue`)
+      and per-member rate limit (30 / 10 min), tunable via `bctx inbox settings`
+      (`config.write`). Studio renders bodies escape-first (`studio/src/lib/inboxText.ts`,
+      DOM-checked XSS tests).
+- [x] **Surfaces** — CLI `bctx inbox {ls,send,show,reply,claim,unclaim,resolve,decline,
+      reopen,cancel,reassign,read,wait,members,settings,hook}` + `hook install --claude`;
+      MCP: 5 tools (`inbox_list/get/send/reply/set`, no blocking wait by design); Studio:
+      Inbox tab, unread badge + `(n)` tab title (own poll, runs while hidden), thread view
+      polling 3s, composer, actions. `bctx status` shows an inbox line.
+- [x] **Hardening found on the way** — the write chain in `tx.ts` is keyed by the ROOT handle
+      (`withPlugin` makes a new instance over the same client → two writers on one connection);
+      `updatePrincipal` preserves override keys it doesn't know (an older client would
+      otherwise silently un-mute a member); `prepare()` skips the no-op `PRAGMA foreign_keys`
+      on remote connections (a wasted round trip).
+- [x] Tests: `inbox`, `mcp-inbox`, `studio-inbox`, `inboxText` + migration/seed updates —
+      **372 tests**. E2E on `dist/`: two `BCTX_HOME`s on one store (background `wait` wakes on
+      the reply, cross-process claim race, hooks 0.26–0.57s, MCP over stdio), Studio in a real
+      browser (compose, live update, XSS payload inert, resolve, badge), and against a real
+      Turso primary with two embedded replicas.
+
+> **Known:** at ~600 ms RTT to the primary a `send` takes ~5s and `reply --resolve` ~7s (gate
+> + reads + batches); reads are parallelized but the access gate's own round trips remain.
+> Older clients (≤0.8.1) never see the inbox, and an admin on ≤0.8.1 who edits a member
+> silently drops that member's `-inbox.write` mute (it predates the forward-compat fix) —
+> admins should upgrade. Pre-existing quirk surfaced in testing:
+> `migrate-online --auth-token-env` doesn't persist the token, so the immediate replica
+> re-bootstrap (and join codes) need `BCTX_TOKEN_<PROJECT>` set.
+
 ## Studio datatable safety — confirm-delete + persistent undo/redo (shipped 2026-07-05)
 
 Prompted by an accidental whole-column delete in the Studio datatable grid (record

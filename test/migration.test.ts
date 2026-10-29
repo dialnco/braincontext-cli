@@ -14,7 +14,7 @@ const tableExists = async (db: Awaited<ReturnType<typeof freshDb>>, name: string
 }
 
 describe('migrations — incrementals upgrade an existing store without data loss', () => {
-  it('applies 0002 + 0003 + 0004 to a store already at 0001, preserving data', async () => {
+  it('applies 0002 … 0005 to a store already at 0001, preserving data', async () => {
     const db = await freshDb() // fully migrated (0001 … 0004)
 
     // Seed real data BEFORE the "downgrade", to prove the migration preserves it.
@@ -33,7 +33,10 @@ describe('migrations — incrementals upgrade an existing store without data los
     await sql`DROP TABLE access_log`.execute(db)
     await sql`DROP TABLE principal_keys`.execute(db)
     await sql`DROP TABLE principals`.execute(db)
-    await sql`DELETE FROM kysely_migration WHERE name IN ('0002_page_properties', '0003_file_storage', '0004_access')`.execute(
+    await sql`DROP TABLE inbox_reads`.execute(db)
+    await sql`DROP TABLE inbox_messages`.execute(db)
+    await sql`DROP TABLE inbox_threads`.execute(db)
+    await sql`DELETE FROM kysely_migration WHERE name IN ('0002_page_properties', '0003_file_storage', '0004_access', '0005_inbox')`.execute(
       db,
     )
     expect(await tableExists(db, 'page_properties')).toBe(false)
@@ -48,6 +51,9 @@ describe('migrations — incrementals upgrade an existing store without data los
     expect(await tableExists(db, 'principals')).toBe(true)
     expect(await tableExists(db, 'principal_keys')).toBe(true)
     expect(await tableExists(db, 'access_log')).toBe(true)
+    expect(await tableExists(db, 'inbox_threads')).toBe(true)
+    expect(await tableExists(db, 'inbox_messages')).toBe(true)
+    expect(await tableExists(db, 'inbox_reads')).toBe(true)
 
     const applied = await sql<{
       name: string
@@ -57,6 +63,7 @@ describe('migrations — incrementals upgrade an existing store without data los
       '0002_page_properties',
       '0003_file_storage',
       '0004_access',
+      '0005_inbox',
     ])
 
     // 0004's ALTER TABLE half is idempotent: `contexts.principal_id` survived the

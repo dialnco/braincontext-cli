@@ -37,7 +37,14 @@ describe('bundled skills', () => {
     const full = getSkill('braincontext', true) ?? ''
     const brief = getSkill('braincontext', false) ?? ''
     expect(full.length).toBeGreaterThan(brief.length)
-    for (const f of ['access.md', 'projects.md', 'schema.md', 'search.md', 'workflows.md']) {
+    for (const f of [
+      'access.md',
+      'inbox.md',
+      'projects.md',
+      'schema.md',
+      'search.md',
+      'workflows.md',
+    ]) {
       expect(full).toContain(`# reference: ${f}`)
     }
   })

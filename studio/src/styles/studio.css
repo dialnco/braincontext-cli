@@ -63,3 +63,46 @@ body {
     transform: none;
   }
 }
+
+/* Inbox message bodies (rendered escape-first by lib/inboxText.ts). */
+.inbox-body {
+  font:
+    400 14px / 1.6 "IBM Plex Sans",
+    sans-serif;
+  color: var(--ink);
+  overflow-wrap: anywhere;
+}
+.inbox-body p {
+  margin: 0 0 8px;
+}
+.inbox-body p:last-child {
+  margin-bottom: 0;
+}
+.inbox-body code {
+  font:
+    400 12.5px "IBM Plex Mono",
+    monospace;
+  background: var(--code-bg);
+  border-radius: 4px;
+  padding: 1px 4px;
+}
+.inbox-body pre {
+  background: var(--code-bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px 12px;
+  overflow-x: auto;
+  margin: 0 0 8px;
+}
+.inbox-body pre code {
+  background: none;
+  padding: 0;
+}
+.inbox-body a {
+  color: var(--accent-ink);
+}
+.inbox-body .inbox-wl {
+  color: var(--accent-ink);
+  border-bottom: 1px dashed var(--accent);
+  cursor: pointer;
+}

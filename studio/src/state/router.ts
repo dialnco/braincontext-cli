@@ -9,7 +9,13 @@ import { useCallback, useEffect, useState } from 'react'
  *   #/graph                → graph overlay view
  *   #/contexts             → contexts tab
  *   #/contexts/<id>        → a context
+ *   #/inbox                → the member inbox
+ *   #/inbox/<num>          → an inbox thread
+ *   #/settings             → settings
  */
+
+/** The top-level views the TopBar navigates between. */
+export type View = 'wiki' | 'contexts' | 'inbox' | 'settings'
 export interface Route {
   /** Path segments after the leading '#/', e.g. ['page','01H…']. */
   parts: string[]

@@ -27,6 +27,11 @@ export interface DbOpts {
   requires?: CommandCapability
   /** What was attempted, for the access log. Defaults to the command path. */
   action?: string
+  /**
+   * Run against the shared primary instead of the local replica (inbox commands —
+   * see core/inbox/target.ts). A local project is refused.
+   */
+  inbox?: boolean
 }
 
 /** ~/.braincontext/store.db */

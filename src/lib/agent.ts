@@ -26,3 +26,20 @@ export function resolveAgent(explicit?: string | null): string {
   if (env.CODEX_SANDBOX) return 'codex'
   return `${safeUser()}@${hostname()}`
 }
+
+/**
+ * True when this process runs under a coding agent rather than a person at a
+ * terminal: an explicit `BCTX_AGENT`, or the same strong per-agent signals
+ * {@link resolveAgent} detects. Used by the inbox's agent-to-agent loop guard. It is
+ * self-reported, so it prevents runaway loops — it is not a security boundary.
+ */
+export function isAgentEnv(): boolean {
+  const env = process.env
+  return !!(
+    env.BCTX_AGENT?.trim() ||
+    env.CLAUDECODE ||
+    env.CLAUDE_CODE ||
+    env.CURSOR_TRACE_ID ||
+    env.CODEX_SANDBOX
+  )
+}

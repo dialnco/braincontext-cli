@@ -3,6 +3,8 @@ import { join } from 'node:path'
 import { Command } from 'commander'
 import { type Context, listContexts, listTags } from '../core/contexts'
 import { withDb } from '../core/db'
+import { inboxLocalAllowed } from '../core/inbox/target'
+import { actorFromSession, type InboxSummary, inboxSummary } from '../core/inbox/threads'
 import { type DbOpts, resolveTarget } from '../core/paths'
 import { currentProjectName } from '../core/registry'
 import { KINDS } from '../core/types'
@@ -49,14 +51,22 @@ export function statusCommand(): Command {
       const dbOpts = dbOptsFrom(command)
       const { project, mode, location } = storeLabel(dbOpts)
 
-      const report = await withDb(dbOpts, async (db) => {
+      const report = await withDb(dbOpts, async (db, access, ctx) => {
         const allCtx = await listContexts(db, { includeDeleted: true, limit: 1_000_000 })
         const live = allCtx.filter((c) => c.deletedAt === null)
         const pages = await listPages(db, { limit: 1_000_000 })
         const tags = await listTags(db)
         const graph = await wikiGraph(db, {})
         const exportItems = await selectContexts(db, {})
+        // Inbox counts from this (just-synced) store — only where an inbox exists.
+        let inbox: InboxSummary | null = null
+        const shared = ctx.target.mode !== 'local' || inboxLocalAllowed()
+        if (shared && access.enabled && access.ok && access.session.can('inbox.read')) {
+          const actor = actorFromSession(access.session, { surface: 'cli', byAgent: false })
+          inbox = await inboxSummary({ db, client: ctx.client }, actor).catch(() => null)
+        }
         return {
+          inbox,
           live,
           deleted: allCtx.length - live.length,
           pages,
@@ -97,6 +107,7 @@ export function statusCommand(): Command {
               tags: report.tagCount,
               deleted: report.deleted,
               agentsMd: agents,
+              inbox: report.inbox,
             },
             null,
             2,
@@ -121,6 +132,12 @@ export function statusCommand(): Command {
       console.log(`Tags       ${report.tagCount}`)
       console.log(`Deleted    ${report.deleted} soft-deleted`)
       console.log(`AGENTS.md  ${agentsLine}`)
+      if (report.inbox) {
+        const i = report.inbox
+        console.log(
+          `Inbox      ${i.unread} unread · ${i.assigned} assigned to you · ${i.team} in the team pool — \`bctx inbox\``,
+        )
+      }
       console.log(
         '\nMCP: `bctx mcp` exposes this store to agents · docs: `bctx skills get braincontext`',
       )

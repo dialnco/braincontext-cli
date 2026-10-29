@@ -560,6 +560,7 @@ export function whoamiCommand(): Command {
           role: s.principal.role,
           capabilities: s.principal.capabilities,
           readOnly: s.readOnly,
+          inbox: { read: s.can('inbox.read'), write: s.can('inbox.write') },
         }
       })
       if (opts.json) {
@@ -579,6 +580,12 @@ export function whoamiCommand(): Command {
         `${info.handle}${info.displayName ? ` (${info.displayName})` : ''} — ${info.role}`,
       )
       console.log(`Capabilities: ${info.capabilities.join(', ')}`)
-      if (info.readOnly) console.log('This identity is read-only.')
+      if (info.readOnly) {
+        console.log(
+          info.inbox.write
+            ? 'This identity is read-only for project knowledge (it can still use `bctx inbox`).'
+            : 'This identity is read-only.',
+        )
+      }
     })
 }

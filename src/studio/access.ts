@@ -34,6 +34,12 @@ export function capabilityFor(method: string, path: string): Capability | null {
   if (p === '/project/sync' || p === '/version') return 'read'
   if (p === '/access' || p.startsWith('/access/')) return 'users.manage'
 
+  // The inbox. `/inbox/status` is ungated so the UI can explain how to enable it.
+  // Matched exactly or by the `/inbox/` prefix (never `startsWith('/inbox')`), and
+  // before the DELETE→delete fallback below.
+  if (p === '/inbox/status') return null
+  if (p === '/inbox' || p.startsWith('/inbox/')) return mutating ? 'inbox.write' : 'inbox.read'
+
   if (p === '/files/status') return 'config.read'
   if (p === '/files/config') return mutating ? 'config.write' : 'config.read'
   if (p === '/files/config/test') return 'files.write'
