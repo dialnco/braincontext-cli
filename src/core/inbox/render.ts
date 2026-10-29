@@ -1,4 +1,6 @@
 import { randomBytes } from 'node:crypto'
+import { formatTokens } from '../../lib/tokens'
+import { INBOX_GUIDE } from './errors'
 import type { InboxSummary, ThreadSummary, ThreadView } from './threads'
 import { WAIT_EXIT, type WaitResult } from './wait'
 
@@ -89,7 +91,13 @@ export function formatThread(view: ThreadView): string {
   if (view.refs.length) {
     lines.push(`refs: ${view.refs.map((r) => `${r.type}:${r.id}`).join(', ')}`)
   }
-  lines.push(`id: ${view.id}`, '', `[${UNTRUSTED_NOTICE}]`, '')
+  lines.push(`id: ${view.id}`)
+  if (view.omitted > 0) {
+    lines.push(
+      `messages: newest ${view.messages.length} (${formatTokens(view.tokenEstimate)}) — ${view.omitted} earlier omitted, whole thread ${formatTokens(view.totalTokenEstimate)}: bctx inbox show ${view.num} --tail 0`,
+    )
+  }
+  lines.push('', `[${UNTRUSTED_NOTICE}]`, '')
   for (const m of view.messages) {
     const author = `@${m.author.handle}${m.author.removed ? ' (removed)' : ''}`
     const via = m.agentSource ? ` via ${oneLine(m.agentSource)}` : ''
@@ -155,9 +163,9 @@ export function formatSummary(
 ): string {
   const where = opts.project ? ` on ${opts.project}` : ''
   const head = `bctx inbox${where} (you are @${opts.handle}): ${s.unread} unread · ${s.assigned} assigned to you · ${s.team} in the team pool · ${s.sent} sent & open.`
-  if (!s.items.length) return head
+  if (!s.items.length) return `${head}\nNew to the inbox? \`${INBOX_GUIDE}\``
   const items = s.items
     .map((i) => `#${i.num} ${i.kind}${i.urgent ? ' (urgent)' : ''} from @${i.from}`)
     .join(', ')
-  return `${head}\nUnread: ${items}.\nRead with \`bctx inbox show <num>\`. ${UNTRUSTED_NOTICE}`
+  return `${head}\nUnread: ${items}.\nRead with \`bctx inbox show <num>\`. ${UNTRUSTED_NOTICE}\nNew to the inbox? \`${INBOX_GUIDE}\``
 }

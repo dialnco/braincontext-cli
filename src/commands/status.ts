@@ -3,6 +3,7 @@ import { join } from 'node:path'
 import { Command } from 'commander'
 import { type Context, listContexts, listTags } from '../core/contexts'
 import { withDb } from '../core/db'
+import { INBOX_GUIDE } from '../core/inbox/errors'
 import { inboxLocalAllowed } from '../core/inbox/target'
 import { actorFromSession, type InboxSummary, inboxSummary } from '../core/inbox/threads'
 import { type DbOpts, resolveTarget } from '../core/paths'
@@ -135,7 +136,7 @@ export function statusCommand(): Command {
       if (report.inbox) {
         const i = report.inbox
         console.log(
-          `Inbox      ${i.unread} unread · ${i.assigned} assigned to you · ${i.team} in the team pool — \`bctx inbox\``,
+          `Inbox      ${i.unread} unread · ${i.assigned} assigned to you · ${i.team} in the team pool — \`bctx inbox\` · guide: \`${INBOX_GUIDE}\``,
         )
       }
       console.log(

@@ -4,6 +4,7 @@ import { z } from 'zod'
 import { AccessDeniedError } from '../core/access/errors'
 import type { AccessSession } from '../core/access/session'
 import { withDb } from '../core/db'
+import { INBOX_GUIDE } from '../core/inbox/errors'
 import {
   claudeSettingsPath,
   exportSessionId,
@@ -23,6 +24,7 @@ import {
 } from '../core/inbox/render'
 import {
   actorFromSession,
+  DEFAULT_TAIL,
   getInboxSettings,
   getThread,
   INBOX_ACTIONS,
@@ -83,9 +85,14 @@ function projectOf(command: Command): string | null {
 }
 
 export function inboxCommand(): Command {
-  const inbox = new Command('inbox').description(
-    'Requests, questions, and tasks between members of a shared project (needs access control).',
-  )
+  const inbox = new Command('inbox')
+    .description(
+      'Requests, questions, and tasks between members of a shared project (needs access control).',
+    )
+    .addHelpText(
+      'after',
+      `\nFull guide (kinds, live conversations, safety rules, hooks): ${INBOX_GUIDE}`,
+    )
 
   inbox
     .command('ls', { isDefault: true })
@@ -158,13 +165,20 @@ export function inboxCommand(): Command {
     .description('Show a thread and its messages (marks it read).')
     .argument('<ref>', 'thread number (42 or #42) or id')
     .option('--since <seq>', 'only messages after this seq')
+    .option(
+      '--tail <n>',
+      `only the newest n messages (default ${DEFAULT_TAIL}; 0 = the whole thread)`,
+    )
     .option('--no-mark-read', 'leave it unread')
     .option('--json', 'output JSON')
     .action(async (ref: string, opts, command: Command) => {
+      const tail = opts.tail !== undefined ? Number(opts.tail) : DEFAULT_TAIL
+      if (!Number.isInteger(tail) || tail < 0) throw new Error(`Invalid --tail: "${opts.tail}".`)
       const view = await withInbox(command, (store, actor) =>
         getThread(store, actor, ref, {
           since: opts.since ? Number(opts.since) : undefined,
           markRead: opts.markRead !== false,
+          tail,
         }),
       )
       print(opts.json, { notice: UNTRUSTED_NOTICE, ...view }, formatThread(view))

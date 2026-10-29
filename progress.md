@@ -45,6 +45,14 @@ of that round.
       `updatePrincipal` preserves override keys it doesn't know (an older client would
       otherwise silently un-mute a member); `prepare()` skips the no-op `PRAGMA foreign_keys`
       on remote connections (a wasted round trip).
+- [x] **Progressive disclosure pass** (follow-up) — the skill's activation `description` now
+      names the inbox (asking a teammate loads the skill); `bctx skills get <skill> --ref
+      <topic>` serves ONE reference (~1k words vs ~4k for `--full`; `skills list` shows the
+      topics); every first-contact surface (hook summary, `status`, unavailable errors, MCP
+      instructions, `inbox --help`) points at `--ref inbox`; `show`/`inbox_get` return the
+      newest 20 messages with `omitted` + `tokenEstimate`/`totalTokenEstimate` (`--tail 0` for
+      all). The ladder (counts → list → thread tail → incremental `--since`) is asserted in
+      `test/disclosure.test.ts`.
 - [x] Tests: `inbox`, `mcp-inbox`, `studio-inbox`, `inboxText` + migration/seed updates —
       **372 tests**. E2E on `dist/`: two `BCTX_HOME`s on one store (background `wait` wakes on
       the reply, cross-process claim race, hooks 0.26–0.57s, MCP over stdio), Studio in a real

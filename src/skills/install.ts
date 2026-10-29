@@ -92,6 +92,7 @@ version-matched content from the installed CLI:
 \`\`\`bash
 bctx skills get ${name}          # start here — quick-start, when to save, command reference
 bctx skills get ${name} --full   # include the reference docs (progressive disclosure)
+bctx skills get ${name} --ref <topic>   # just one reference doc (see \`bctx skills list\`)
 \`\`\`
 
 The CLI serves skill content that always matches the installed version, so instructions never

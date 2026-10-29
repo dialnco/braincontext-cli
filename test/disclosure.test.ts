@@ -2,12 +2,26 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js'
 import type { Kysely } from 'kysely'
 import { describe, expect, it } from 'vitest'
+import { createSessionResolver } from '../src/core/access/cache'
+import { createPrincipal, issueKey } from '../src/core/access/principals'
+import { resolveSession } from '../src/core/access/session'
+import { setAccessEnabled } from '../src/core/access/settings'
 import { searchContexts } from '../src/core/contexts'
+import { formatSummary } from '../src/core/inbox/render'
+import {
+  actorFromSession,
+  inboxSession,
+  inboxSummary,
+  replyThread,
+  sendThread,
+} from '../src/core/inbox/threads'
+import { waitForMessages } from '../src/core/inbox/wait'
 import type { Database } from '../src/core/types'
 import { createPage, listPages, pagePeek } from '../src/core/wiki'
 import { buildServer } from '../src/mcp/server'
+import { getSkill, getSkillRefs, listSkills } from '../src/skills/index'
 import { renderIndexMarkdown } from '../src/wiki/export'
-import { freshDb } from './_db'
+import { freshDb, freshStore } from './_db'
 
 async function connect(db: Kysely<Database>): Promise<Client> {
   const server = buildServer(db)
@@ -167,5 +181,109 @@ describe('disclosure ladder (MCP)', () => {
     })
     expect((failed as { isError?: boolean }).isError).toBe(true)
     await db.destroy()
+  })
+})
+
+describe('disclosure ladder (inbox)', () => {
+  const SECRET = 'body-text-that-must-stay-out-of-cheap-rungs'
+
+  /** Two members, one thread with `replies` extra messages. */
+  async function thread(replies: number) {
+    const { db, client } = await freshStore()
+    const keys: Record<string, string> = {}
+    for (const handle of ['diego', 'susana']) {
+      await createPrincipal(db, { handle, role: 'writer' })
+      keys[handle] = (await issueKey(db, handle)).key
+    }
+    await setAccessEnabled(db, true)
+    const as = async (h: string) =>
+      actorFromSession(inboxSession(await resolveSession(db, keys[h])), {
+        surface: 'cli',
+        byAgent: false,
+      })
+    const store = { db, client }
+    // An explicit title: listings show titles (they default to the body's first line).
+    await sendThread(store, await as('diego'), {
+      to: '@susana',
+      title: 'Short title',
+      body: `${SECRET} 0`,
+    })
+    for (let i = 1; i <= replies; i++) {
+      await replyThread(store, await as(i % 2 ? 'susana' : 'diego'), '1', `${SECRET} ${i}`)
+    }
+    return { db, client, keys, store, as }
+  }
+
+  it('rung 0: the skill trigger mentions the inbox, so asking a teammate loads it', () => {
+    const skill = listSkills().find((s) => s.name === 'braincontext')
+    expect(skill?.description).toMatch(/inbox/i)
+    expect(skill?.description).toMatch(/teammate|member/i)
+  })
+
+  it('rung 1: counts only — the hook summary carries no titles or bodies, and points at the guide', async () => {
+    const { store, as } = await thread(2)
+    const summary = await inboxSummary(store, await as('susana'))
+    const text = formatSummary(summary, { handle: 'susana' })
+    expect(JSON.stringify(summary)).not.toContain(SECRET)
+    expect(text).not.toContain(SECRET)
+    expect(text).toContain('bctx skills get braincontext --ref inbox')
+  })
+
+  it('rung 2: inbox_list and wait return metadata, never bodies', async () => {
+    const { db, client, keys, store, as } = await thread(1)
+    const session = createSessionResolver(db, keys.susana)
+    const server = buildServer(
+      db,
+      { db, session },
+      {
+        inbox: { session: 'mcp-t', store: async () => ({ db, client }) },
+      },
+    )
+    const [a, b] = InMemoryTransport.createLinkedPair()
+    const mcp = new Client({ name: 'test', version: '0.0.0' })
+    await Promise.all([server.connect(b), mcp.connect(a)])
+    const listed = await mcp.callTool({ name: 'inbox_list', arguments: {} })
+    expect(JSON.stringify(listed)).not.toContain(SECRET)
+    const woke = await waitForMessages(store, await as('diego'), {
+      since: 0,
+      sleep: async () => undefined,
+    })
+    expect(woke.hits.length).toBeGreaterThan(0)
+    expect(JSON.stringify(woke)).not.toContain(SECRET)
+  })
+
+  it('rung 3: inbox_get returns the newest 20 with omitted + token costs; tail:0 is everything', async () => {
+    const { db, client, keys } = await thread(24) // 25 messages
+    const session = createSessionResolver(db, keys.susana)
+    const server = buildServer(
+      db,
+      { db, session },
+      {
+        inbox: { session: 'mcp-t', store: async () => ({ db, client }) },
+      },
+    )
+    const [a, b] = InMemoryTransport.createLinkedPair()
+    const mcp = new Client({ name: 'test', version: '0.0.0' })
+    await Promise.all([server.connect(b), mcp.connect(a)])
+    const tailed = payload(await mcp.callTool({ name: 'inbox_get', arguments: { ref: '1' } }))
+    expect(tailed.messages.length).toBe(20)
+    expect(tailed.omitted).toBe(5)
+    expect(tailed.messages[0].body).toBe(`${SECRET} 5`) // newest 20, oldest first
+    expect(tailed.messages.at(-1).body).toBe(`${SECRET} 24`)
+    expect(tailed.tokenEstimate).toBeGreaterThan(0)
+    expect(tailed.totalTokenEstimate).toBeGreaterThan(tailed.tokenEstimate)
+    const all = payload(await mcp.callTool({ name: 'inbox_get', arguments: { ref: '1', tail: 0 } }))
+    expect(all.messages.length).toBe(25)
+    expect(all.omitted).toBe(0)
+  })
+
+  it('docs: --ref serves one reference, far smaller than --full', () => {
+    const one = getSkillRefs('braincontext', ['inbox']) ?? ''
+    const full = getSkill('braincontext', true) ?? ''
+    expect(one).toContain('# reference: inbox.md')
+    expect(one).not.toContain('# reference: access.md')
+    expect(one.length * 3).toBeLessThan(full.length)
+    expect(getSkillRefs('braincontext', ['inbox.md'])).toBe(one)
+    expect(() => getSkillRefs('braincontext', ['nope'])).toThrow(/Available: access, inbox/)
   })
 })

@@ -2,6 +2,7 @@ import type { Client, InArgs, ResultSet } from '@libsql/client'
 import { type Compilable, type Kysely, type Selectable, sql } from 'kysely'
 import { ulid } from 'ulidx'
 import { resolveAgent } from '../../lib/agent'
+import { estimateTokens } from '../../lib/tokens'
 import { AccessDeniedError } from '../access/errors'
 import { toPrincipal } from '../access/principals'
 import { type AccessSession, describeFailure, type SessionResult } from '../access/session'
@@ -156,6 +157,12 @@ export interface InboxMessage {
 export interface ThreadView extends ThreadSummary {
   refs: InboxRef[]
   messages: InboxMessage[]
+  /** Older messages left out by `tail` (0 when everything in range was returned). */
+  omitted: number
+  /** ~Tokens of the returned bodies — what reading this view costs. */
+  tokenEstimate: number
+  /** ~Tokens of every body in range, including omitted ones — what the whole thread costs. */
+  totalTokenEstimate: number
 }
 
 // ── Limits & settings ──────────────────────────────────────────────────────────
@@ -562,7 +569,16 @@ export interface GetOptions {
   since?: number
   /** Mark the thread read for the caller (default true; best effort). */
   markRead?: boolean
+  /**
+   * Only the newest N messages (with `omitted` saying how many older ones were left
+   * out). The disclosure default for agents: a long thread costs its tail, not its
+   * history. Omit (or 0) for everything.
+   */
+  tail?: number
 }
+
+/** Default `tail` for agent-facing reads (CLI `show`, MCP `inbox_get`). */
+export const DEFAULT_TAIL = 20
 
 export async function getThread(
   store: InboxStore,
@@ -591,12 +607,25 @@ export async function getThread(
     .selectAll('m')
     .where('m.seq', '>', opts.since ?? 0)
   msgQ = 'num' in parsed ? msgQ.where('t.num', '=', parsed.num) : msgQ.where('t.id', '=', parsed.id)
-  const [found, messages, index] = await Promise.all([
+  const tail = opts.tail && opts.tail > 0 ? Math.min(opts.tail, 1000) : 0
+  // With a tail: newest-first + limit, then flipped; plus the size of the whole range
+  // (count and ~tokens, from body lengths) so the caller knows what it is not seeing.
+  const [found, fetched, totals, index] = await Promise.all([
     threadQ.executeTakeFirst(),
-    msgQ.orderBy('m.seq', 'asc').limit(1000).execute(),
+    tail
+      ? msgQ.orderBy('m.seq', 'desc').limit(tail).execute()
+      : msgQ.orderBy('m.seq', 'asc').limit(1000).execute(),
+    msgQ
+      .clearSelect()
+      .select([
+        (eb) => eb.fn.countAll<number>().as('n'),
+        sql<number>`coalesce(sum((length(m.body) + 3) / 4), 0)`.as('tokens'),
+      ])
+      .executeTakeFirst(),
     principalIndex(store.db),
   ])
   if (!found) throw new InboxError(`No inbox thread ${ref}.`, 'not_found')
+  const messages = tail ? [...fetched].reverse() : fetched
   const { last_read, ...row } = found
   const read = { last_read_seq: Number(last_read) }
   const view: ThreadView = {
@@ -614,6 +643,9 @@ export async function getThread(
       body: m.body,
       createdAt: m.created_at,
     })),
+    omitted: Math.max(0, Number(totals?.n ?? 0) - messages.length),
+    tokenEstimate: messages.reduce((n, m) => n + estimateTokens(m.body), 0),
+    totalTokenEstimate: Number(totals?.tokens ?? 0),
   }
   if (opts.markRead !== false && view.unread) {
     try {

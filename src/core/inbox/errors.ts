@@ -37,6 +37,13 @@ export const INBOX_HTTP_STATUS: Record<InboxErrorCode, 400 | 403 | 404 | 409 | 4
   agent_turn_limit: 429,
 }
 
+/**
+ * The narrowest doc rung for the inbox. Every first-contact surface (the hook, `bctx
+ * status`, the "unavailable" errors, MCP instructions) ends with it, so an agent that
+ * meets the inbox before loading any skill knows exactly what to read — and only that.
+ */
+export const INBOX_GUIDE = 'bctx skills get braincontext --ref inbox'
+
 /** What to do to get an inbox, shown wherever it is unavailable. */
 export const INBOX_SETUP_STEPS = [
   'The inbox needs a shared project with access control on:',
@@ -45,4 +52,5 @@ export const INBOX_SETUP_STEPS = [
   '  3. bctx access user add <handle> --role writer   (prints a join code per member)',
   '  4. each member runs: bctx project join <code>',
   'Note: once access control is on, members using the raw database token need a join code too.',
+  `How the inbox works: ${INBOX_GUIDE}`,
 ].join('\n')
