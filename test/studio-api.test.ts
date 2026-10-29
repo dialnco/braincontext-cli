@@ -384,4 +384,14 @@ describe('studio projects API', () => {
     }>
     expect(projects.some((p) => p.current)).toBe(true)
   })
+
+  it('sync reports whether anything arrived, so the auto-sync can skip a refresh', async () => {
+    const app = await newApp()
+    const res = await app.request('/api/project/sync', { method: 'POST' })
+    expect(res.status).toBe(200)
+    const body = (await res.json()) as { mode: string; changed: boolean; syncedAt: string }
+    expect(body.mode).toBe('local')
+    expect(body.changed).toBe(false)
+    expect(Number.isNaN(Date.parse(body.syncedAt))).toBe(false)
+  })
 })

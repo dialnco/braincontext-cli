@@ -85,7 +85,7 @@ export function InboxView({ onNav }: { onNav: (v: View) => void }) {
 
   const listState = useAsync(
     () => (available ? inboxApi.list({ box, status }) : Promise.resolve([] as ThreadSummary[])),
-    [box, status, available, localRev, app.project?.project],
+    [box, status, available, localRev, app.project?.project, app.rev],
   )
   // Keep the list fresh while the tab is visible.
   const { reload } = listState

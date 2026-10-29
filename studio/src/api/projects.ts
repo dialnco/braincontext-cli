@@ -6,5 +6,6 @@ export const projectsApi = {
   list: () => api.get<ProjectInfo[]>('/projects'),
   status: () => api.get<ProjectStatus>('/project'),
   switch: (name: string) => api.post<ProjectStatus>('/project/switch', { name }),
-  sync: () => api.post<ProjectStatus>('/project/sync'),
+  /** `changed`: frames arrived from the primary (the auto-sync refreshes only then). */
+  sync: () => api.post<ProjectStatus & { changed: boolean; syncedAt: string }>('/project/sync'),
 }

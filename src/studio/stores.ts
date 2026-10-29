@@ -16,6 +16,7 @@ import {
   type ProjectMode,
   projectToTarget,
 } from '../core/registry'
+import { serializeWrite } from '../core/tx'
 import type { Database } from '../core/types'
 
 /** A snapshot of which store the Studio server is currently serving. */
@@ -51,7 +52,8 @@ export interface StoreProvider {
   status(): ProjectStatus
   projects(): ProjectInfo[]
   switch(name: string): Promise<ProjectStatus>
-  sync(): Promise<void>
+  /** Pull from the primary; resolves to the number of frames that arrived. */
+  sync(): Promise<number>
   close(): Promise<void>
   /**
    * The inbox connection for the current project — the shared primary, opened on
@@ -171,7 +173,9 @@ export async function createStoreManager(opts: DbOpts): Promise<StoreProvider> {
       chain = run.catch(() => undefined)
       return run
     },
-    sync: () => store.sync(),
+    // In this connection's write chain: a sync must never overlap an in-flight write
+    // transaction on the same client (Studio now syncs on a timer, not just on demand).
+    sync: () => serializeWrite(store.db, () => store.sync()),
     close: async () => {
       await closeInbox()
       await store.close()
@@ -200,7 +204,7 @@ export function staticProvider(db: Kysely<Database>, client?: Client): StoreProv
     status: () => ({ project: 'test', mode: 'local', location: ':test:', noSync: true }),
     projects: () => [{ name: 'test', mode: 'local', current: true }],
     switch: async () => ({ project: 'test', mode: 'local', location: ':test:', noSync: true }),
-    sync: async () => undefined,
+    sync: async () => 0,
     close: async () => undefined,
     enter: () => undefined,
     leave: () => undefined,

@@ -26,9 +26,10 @@ export function projectsRoutes(provider: StoreProvider): Hono {
     }
   })
 
+  // `changed` lets the SPA's periodic auto-sync skip a full refresh when nothing arrived.
   app.post('/project/sync', async (c) => {
-    await provider.sync()
-    return c.json(provider.status())
+    const frames = await provider.sync()
+    return c.json({ ...provider.status(), changed: frames > 0, syncedAt: new Date().toISOString() })
   })
 
   return app

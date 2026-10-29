@@ -46,8 +46,11 @@ export interface Store {
   client: Client
   /** Apply per-store pragmas (WAL for files + foreign_keys). Run once after open. */
   prepare(): Promise<void>
-  /** Pull the latest frames from the primary. No-op unless this is a replica. */
-  sync(): Promise<void>
+  /**
+   * Pull the latest frames from the primary; resolves to how many arrived (0 = nothing
+   * new, or not a replica) so a caller can skip a refresh when nothing changed.
+   */
+  sync(): Promise<number>
   /** Tear down Kysely and close the underlying libSQL client. */
   close(): Promise<void>
 }
@@ -104,7 +107,9 @@ export function openStore(t: DbTarget): Store {
       if (isFile) await sql`PRAGMA foreign_keys = ON`.execute(db)
     },
     sync: async () => {
-      if (t.mode === 'replica') await client.sync()
+      if (t.mode !== 'replica') return 0
+      const rep = await client.sync()
+      return rep?.frames_synced ?? 0
     },
     close: async () => {
       await db.destroy()

@@ -1,5 +1,6 @@
 import type { ProjectStatus } from '../../api/types'
 import { Hov, sx } from '../../lib/dc'
+import { relTime } from '../../lib/time'
 import type { View } from '../../state/router'
 import { useApp } from '../../state/StoreContext'
 import { Icon } from '../common/Icon'
@@ -80,7 +81,7 @@ export function TopBar(props: Props) {
           )}
           hover={sx('background:var(--accent-soft);color:var(--accent-ink);')}
           onClick={props.onSync}
-          title="Sync replica"
+          title={`Sync now — pulls other members' changes (auto every 45s while open)${app.lastSyncedAt ? ` · last synced ${relTime(app.lastSyncedAt)}` : ''}`}
         >
           <Icon name="sync" size={15} />
         </Hov>

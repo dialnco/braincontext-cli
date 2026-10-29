@@ -53,6 +53,15 @@ of that round.
       newest 20 messages with `omitted` + `tokenEstimate`/`totalTokenEstimate` (`--tail 0` for
       all). The ladder (counts → list → thread tail → incremental `--since`) is asserted in
       `test/disclosure.test.ts`.
+- [x] **Studio sync** (follow-up) — Studio now auto-syncs a replica every 45s while the
+      tab is visible (and on returning to it), skipping ticks while the editor is dirty; the
+      sync runs in the connection's write chain so it never overlaps a write. `POST
+      /api/project/sync` reports `changed` (libSQL `frames_synced > 0`), so views refetch only
+      when frames arrived. Fixes the pre-existing gap where a joined replica (no
+      `syncInterval`) never showed other members' wiki/context edits until a manual sync or a
+      restart. The manual ↻ button now also refreshes the inbox and shows the last sync time.
+      Verified on Turso: a context written from another member's replica appeared in Studio
+      after ~30s with no click; the inbox badge appeared ~5s after a manual sync.
 - [x] Tests: `inbox`, `mcp-inbox`, `studio-inbox`, `inboxText` + migration/seed updates —
       **372 tests**. E2E on `dist/`: two `BCTX_HOME`s on one store (background `wait` wakes on
       the reply, cross-process claim race, hooks 0.26–0.57s, MCP over stdio), Studio in a real

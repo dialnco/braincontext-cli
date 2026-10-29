@@ -57,11 +57,16 @@ interface AppState {
    */
   inbox: { info: InboxStatusInfo | null; unread: number | null }
   refreshInbox: () => void
+  /** When the replica last pulled from the primary (manual or automatic), or null. */
+  lastSyncedAt: string | null
 }
 
 const Ctx = createContext<AppState | null>(null)
 
 const THEME_KEY = 'bctx-studio-theme'
+
+/** How often Studio pulls a replica from its primary while the tab is visible. */
+const AUTO_SYNC_MS = 45_000
 
 function initialTheme(): ThemeName {
   const saved = localStorage.getItem(THEME_KEY)
@@ -80,6 +85,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
   const [inboxUnread, setInboxUnread] = useState<number | null>(null)
   const [inboxNonce, setInboxNonce] = useState(0)
   const refreshInbox = useCallback(() => setInboxNonce((n) => n + 1), [])
+  const [lastSyncedAt, setLastSyncedAt] = useState<string | null>(null)
 
   const toggleTheme = useCallback(() => {
     setTheme((t) => {
@@ -139,14 +145,18 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
 
   const syncProject = useCallback(async () => {
     try {
-      const status = await projectsApi.sync()
+      const { changed: _changed, syncedAt, ...status } = await projectsApi.sync()
       setProject(status)
+      setLastSyncedAt(syncedAt)
+      // A manual sync refreshes everything — the inbox included, even though it reads
+      // the primary directly: whoever presses the button expects every view current.
       bump()
+      refreshInbox()
       toast('Synced')
     } catch (e) {
       toast(e instanceof ApiError ? e.message : 'Sync failed')
     }
-  }, [bump, toast])
+  }, [bump, refreshInbox, toast])
 
   const refreshAuth = useCallback(async () => {
     try {
@@ -235,6 +245,44 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
     return () => window.clearInterval(id)
   }, [bump])
 
+  // Auto-sync a replica. A joined replica has no background `syncInterval` by default,
+  // so without this, other members' wiki/context edits would only appear on a manual
+  // sync or a restart. Every 45s while the tab is visible (plus once on returning to
+  // it), never while the editor holds unsaved edits, and views refetch only when frames
+  // actually arrived. Silent: a failed tick just tries again next time.
+  const replicaSyncs = project?.mode === 'replica' && !project.noSync
+  useEffect(() => {
+    if (!replicaSyncs) return
+    let inFlight = false
+    let lastRun = Date.now()
+    const tick = async () => {
+      if (document.hidden || inFlight || dirtyRef.current?.()) return
+      inFlight = true
+      lastRun = Date.now()
+      try {
+        const { changed, syncedAt } = await projectsApi.sync()
+        setLastSyncedAt(syncedAt)
+        if (changed) {
+          bump()
+          refreshInbox()
+        }
+      } catch {
+        // offline or mid-switch — next tick
+      } finally {
+        inFlight = false
+      }
+    }
+    const id = window.setInterval(tick, AUTO_SYNC_MS)
+    const onVisible = () => {
+      if (!document.hidden && Date.now() - lastRun >= AUTO_SYNC_MS) void tick()
+    }
+    document.addEventListener('visibilitychange', onVisible)
+    return () => {
+      window.clearInterval(id)
+      document.removeEventListener('visibilitychange', onVisible)
+    }
+  }, [replicaSyncs, bump, refreshInbox])
+
   // Inbox: re-check availability whenever the project or identity changes, then poll
   // the unread count — every 20s while visible, every 60s while hidden.
   const projectName = project?.project ?? null
@@ -293,6 +341,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
       cancelSwitchIdentity,
       inbox: { info: inboxInfo, unread: inboxUnread },
       refreshInbox,
+      lastSyncedAt,
     }),
     [
       theme,
@@ -318,6 +367,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
       inboxInfo,
       inboxUnread,
       refreshInbox,
+      lastSyncedAt,
     ],
   )
 
