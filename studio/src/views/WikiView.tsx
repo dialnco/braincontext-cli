@@ -21,7 +21,7 @@ import { WikiEditor, type WikiEditorHandle } from '../editor/WikiEditor'
 import { Hov, sx } from '../lib/dc'
 import { freshnessColor, pageFreshness } from '../lib/freshness'
 import { GRAPH_NODE_CAP } from '../lib/graph'
-import { pageHref, useRoute, type View } from '../state/router'
+import { pageHref, useRoute, type View, viewOf } from '../state/router'
 import { useApp } from '../state/StoreContext'
 import { useAsync } from '../state/useAsync'
 
@@ -63,7 +63,7 @@ export function WikiView({ onNav }: { onNav: (v: View) => void }) {
   )
 
   // Any route owned by another top-level view — navigating there must not bounce back.
-  const onOtherView = route.parts[0] === 'contexts' || route.parts[0] === 'settings'
+  const onOtherView = viewOf(route.parts) !== 'wiki'
   const routeId = route.parts[0] === 'page' ? route.parts[1] : undefined
   const activeId = routeId ?? pages[0]?.id ?? null
 

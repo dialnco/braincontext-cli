@@ -16,6 +16,20 @@ import { useCallback, useEffect, useState } from 'react'
 
 /** The top-level views the TopBar navigates between. */
 export type View = 'wiki' | 'contexts' | 'inbox' | 'settings'
+
+/** Views that own their own top-level route segment (`#/<view>…`); everything else is the wiki. */
+const ROUTED_VIEWS: readonly View[] = ['contexts', 'inbox', 'settings']
+
+/**
+ * The view a route belongs to — the single source of truth for both the shell's
+ * view switch and the wiki's "default to the first page" redirect (which must
+ * never fire on another view's route, or that tab bounces straight back).
+ */
+export function viewOf(parts: readonly string[]): View {
+  const first = parts[0] as View | undefined
+  return first && ROUTED_VIEWS.includes(first) ? first : 'wiki'
+}
+
 export interface Route {
   /** Path segments after the leading '#/', e.g. ['page','01H…']. */
   parts: string[]

@@ -1,6 +1,6 @@
 import type React from 'react'
 import { DARK, LIGHT } from './lib/theme'
-import { useRoute, type View } from './state/router'
+import { useRoute, type View, viewOf } from './state/router'
 import { StoreProvider, useApp } from './state/StoreContext'
 import { ContextsView } from './views/ContextsView'
 import { InboxView } from './views/InboxView'
@@ -17,9 +17,7 @@ import './styles/studio.css'
 function Shell() {
   const app = useApp()
   const route = useRoute()
-  const first = route.parts[0]
-  const view: View =
-    first === 'contexts' || first === 'settings' || first === 'inbox' ? first : 'wiki'
+  const view = viewOf(route.parts)
   const onNav = (v: View) => route.navigate(v === 'wiki' ? '/' : `/${v}`)
 
   const vars = {
