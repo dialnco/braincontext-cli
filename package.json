@@ -1,6 +1,6 @@
 {
   "name": "braincontext-cli",
-  "version": "0.9.1",
+  "version": "0.9.2",
   "description": "Local-first SQLite CLI for saving and retrieving shared context across AI coding agents (Claude, Codex, Cursor, ...).",
   "type": "module",
   "license": "MIT",
