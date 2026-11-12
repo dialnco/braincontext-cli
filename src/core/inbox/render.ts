@@ -1,7 +1,7 @@
 import { randomBytes } from 'node:crypto'
 import { formatTokens } from '../../lib/tokens'
 import { INBOX_GUIDE } from './errors'
-import type { InboxSummary, ThreadSummary, ThreadView } from './threads'
+import type { InboxRef, InboxSummary, ThreadSummary, ThreadView } from './threads'
 import { WAIT_EXIT, type WaitResult } from './wait'
 
 /**
@@ -30,6 +30,22 @@ function defuse(text: string): string {
 /** A single display line (titles, labels): defused, newlines collapsed. */
 export function oneLine(text: string): string {
   return defuse(text).replace(/\s+/g, ' ').trim()
+}
+
+/** One ref line: id first (what tools take), then the untrusted label, defused + capped. */
+function describeRef(r: InboxRef): string {
+  const head = `${r.type}:${r.id}`
+  if (r.missing) return `${head} (deleted)`
+  const label = r.label ? ` "${oneLine(r.label).slice(0, 80)}"` : ''
+  if (r.type !== 'file') return `${head}${label}`
+  const meta = [r.mime, r.size !== undefined ? formatBytes(r.size) : null].filter(Boolean)
+  return `${head}${label}${meta.length ? ` (${meta.join(', ')})` : ''} — bctx file url ${r.id}`
+}
+
+function formatBytes(n: number): string {
+  if (n < 1024) return `${n} B`
+  if (n < 1024 * 1024) return `${Math.round(n / 1024)} KB`
+  return `${(n / (1024 * 1024)).toFixed(1)} MB`
 }
 
 function nonce(): string {
@@ -89,7 +105,8 @@ export function formatThread(view: ThreadView): string {
     lines.push(`${view.status} by @${view.closedBy}`)
   }
   if (view.refs.length) {
-    lines.push(`refs: ${view.refs.map((r) => `${r.type}:${r.id}`).join(', ')}`)
+    lines.push('refs:')
+    for (const r of view.refs) lines.push(`  ${describeRef(r)}`)
   }
   lines.push(`id: ${view.id}`)
   if (view.omitted > 0) {

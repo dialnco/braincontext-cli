@@ -38,7 +38,9 @@ bctx inbox cancel 42                         # you sent it and it is no longer n
 ```
 
 Threads are referenced by number (`42` or `#42`). Add `--json` for machine-readable output.
-Bodies longer than 32 KB belong in a wiki page or file — pass its id with `--ref`.
+Bodies longer than 32 KB belong in a wiki page or file — pass its id with `--ref`. `show`
+lists each ref with its title, or a file's name, type, and size; fetch a file with
+`bctx file url <id>`.
 
 ## Read progressively
 

@@ -134,8 +134,58 @@ describe('inbox — sending and reading', () => {
     ).toBe('invalid')
     const ctx = await createContext(store.db, { body: 'a note' })
     const ok = await sendThread(...as('diego'), { to: '@susana', body: 'see', refs: [ctx.id] })
-    expect(ok.refs).toEqual([{ type: 'context', id: ctx.id }])
+    expect(ok.refs).toEqual([{ type: 'context', id: ctx.id, label: null }])
     expect((await listMembers(store.db)).map((m) => m.handle)).not.toContain('pedro')
+  })
+
+  it('describes refs at read time: titles, file name/type/size, deleted targets', async () => {
+    const { store, as } = await team()
+    const ctx = await createContext(store.db, { title: 'Billing notes', body: 'a note' })
+    await store.db
+      .insertInto('files')
+      .values({
+        id: '01FILEREF000000000000000AA',
+        object_key: 'files/01FILEREF000000000000000AA/Informe.docx',
+        filename: 'Informe_final.docx',
+        mime: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+        size: 48_000,
+        sha256: null,
+        agent_source: null,
+        metadata: '{}',
+        created_at: new Date().toISOString(),
+        deleted_at: null,
+        principal_id: null,
+      })
+      .execute()
+    const sent = await sendThread(...as('diego'), {
+      to: '@susana',
+      body: 'QC please',
+      refs: [ctx.id, '01FILEREF000000000000000AA'],
+    })
+    const view = await getThread(...as('susana'), String(sent.num))
+    expect(view.refs).toEqual([
+      { type: 'context', id: ctx.id, label: 'Billing notes' },
+      {
+        type: 'file',
+        id: '01FILEREF000000000000000AA',
+        label: 'Informe_final.docx',
+        mime: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+        size: 48_000,
+      },
+    ])
+    const text = formatThread(view)
+    expect(text).toContain('file:01FILEREF000000000000000AA "Informe_final.docx"')
+    expect(text).toContain('47 KB')
+    expect(text).toContain('bctx file url 01FILEREF000000000000000AA')
+
+    await store.db
+      .updateTable('files')
+      .set({ deleted_at: new Date().toISOString() })
+      .where('id', '=', '01FILEREF000000000000000AA')
+      .execute()
+    const after = await getThread(...as('susana'), String(sent.num))
+    expect(after.refs[1]).toEqual({ type: 'file', id: '01FILEREF000000000000000AA', missing: true })
+    expect(formatThread(after)).toContain('file:01FILEREF000000000000000AA (deleted)')
   })
 
   it('a reader can use the inbox but still cannot write knowledge', async () => {

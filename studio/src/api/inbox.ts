@@ -57,8 +57,20 @@ export interface InboxMessage {
   createdAt: string
 }
 
+/** A page/context/file a thread points at, described at read time (mirrors core InboxRef). */
+export interface InboxRef {
+  type: 'page' | 'context' | 'file'
+  id: string
+  /** Page/context title or file name. Untrusted member-written text. */
+  label?: string | null
+  mime?: string
+  size?: number
+  /** Deleted since it was referenced. */
+  missing?: boolean
+}
+
 export interface ThreadView extends ThreadSummary {
-  refs: Array<{ type: 'page' | 'context' | 'file'; id: string }>
+  refs: InboxRef[]
   messages: InboxMessage[]
 }
 

@@ -117,6 +117,15 @@ export interface PersonRef {
 export interface InboxRef {
   type: 'page' | 'context' | 'file'
   id: string
+  /**
+   * Read-time description (never stored): the page/context title or the file's name,
+   * plus a file's MIME type and size. `missing` = deleted since it was referenced.
+   * Untrusted, like any member-written text.
+   */
+  label?: string | null
+  mime?: string
+  size?: number
+  missing?: boolean
 }
 
 export interface ThreadSummary {
@@ -335,13 +344,15 @@ function parseRefs(raw: string): InboxRef[] {
   try {
     const v: unknown = JSON.parse(raw)
     return Array.isArray(v)
-      ? v.filter(
-          (r): r is InboxRef =>
-            !!r &&
-            typeof r === 'object' &&
-            ['page', 'context', 'file'].includes((r as InboxRef).type) &&
-            typeof (r as InboxRef).id === 'string',
-        )
+      ? v
+          .filter(
+            (r): r is InboxRef =>
+              !!r &&
+              typeof r === 'object' &&
+              ['page', 'context', 'file'].includes((r as InboxRef).type) &&
+              typeof (r as InboxRef).id === 'string',
+          )
+          .map((r) => ({ type: r.type, id: r.id }))
       : []
   } catch {
     return []
@@ -370,6 +381,47 @@ async function resolveMember(
     throw new InboxError(`@${p.handle} cannot see the inbox (no inbox.read).`, 'no_such_member')
   }
   return { id: p.id, handle: p.handle }
+}
+
+/**
+ * Describe stored refs for display — titles for pages/contexts, name + type + size for
+ * files — in one round trip (two parallel lookups). A ref whose target was deleted
+ * since is kept and flagged `missing`, so the reader still sees what was pointed at.
+ */
+export async function describeRefs(db: Kysely<Database>, refs: InboxRef[]): Promise<InboxRef[]> {
+  if (refs.length === 0) return refs
+  const ctxIds = refs.filter((r) => r.type !== 'file').map((r) => r.id)
+  const fileIds = refs.filter((r) => r.type === 'file').map((r) => r.id)
+  const [ctxs, files] = await Promise.all([
+    ctxIds.length
+      ? db
+          .selectFrom('contexts')
+          .select(['id', 'title'])
+          .where('id', 'in', ctxIds)
+          .where('deleted_at', 'is', null)
+          .execute()
+      : [],
+    fileIds.length
+      ? db
+          .selectFrom('files')
+          .select(['id', 'filename', 'mime', 'size'])
+          .where('id', 'in', fileIds)
+          .where('deleted_at', 'is', null)
+          .execute()
+      : [],
+  ])
+  const ctxById = new Map(ctxs.map((c) => [c.id, c]))
+  const fileById = new Map(files.map((f) => [f.id, f]))
+  return refs.map((r) => {
+    if (r.type === 'file') {
+      const f = fileById.get(r.id)
+      return f
+        ? { ...r, label: f.filename, mime: f.mime, size: Number(f.size) }
+        : { ...r, missing: true }
+    }
+    const c = ctxById.get(r.id)
+    return c ? { ...r, label: c.title } : { ...r, missing: true }
+  })
 }
 
 /** Ids only; the reader resolves each through its own gated routes. */
@@ -627,10 +679,12 @@ export async function getThread(
   if (!found) throw new InboxError(`No inbox thread ${ref}.`, 'not_found')
   const messages = tail ? [...fetched].reverse() : fetched
   const { last_read, ...row } = found
+  // Best effort: a ref is still useful as a bare id if the lookup fails.
+  const refs = await describeRefs(store.db, parseRefs(row.refs)).catch(() => parseRefs(row.refs))
   const read = { last_read_seq: Number(last_read) }
   const view: ThreadView = {
     ...toSummary(row, read.last_read_seq, index),
-    refs: parseRefs(row.refs),
+    refs,
     messages: messages.map((m) => ({
       seq: m.seq as unknown as number,
       id: m.id,

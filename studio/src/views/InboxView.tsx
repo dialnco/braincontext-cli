@@ -1,12 +1,14 @@
 import type React from 'react'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { ApiError } from '../api/client'
+import { fileContentUrl } from '../api/files'
 import {
   INBOX_KINDS,
   type InboxAction,
   type InboxBox,
   type InboxKind,
   type InboxMessage,
+  type InboxRef,
   inboxApi,
   OPEN_STATUSES,
   type ThreadSummary,
@@ -16,6 +18,7 @@ import { wikiApi } from '../api/wiki'
 import { ProjectSwitcher } from '../components/layout/ProjectSwitcher'
 import { TopBar } from '../components/layout/TopBar'
 import { Hov, sx } from '../lib/dc'
+import { fileType, formatBytes } from '../lib/fileType'
 import { renderInboxBody } from '../lib/inboxText'
 import { relTime } from '../lib/time'
 import { pageHref, useRoute, type View } from '../state/router'
@@ -69,6 +72,97 @@ function Pill({ text, color }: { text: string; color: string }) {
     >
       {text}
     </span>
+  )
+}
+
+/**
+ * A thread ref: a file shows its type tag, name and size and downloads on click; a
+ * page or context shows its title and opens it. Deleted targets render inert.
+ */
+function RefChip({
+  r,
+  canDownload,
+  onOpen,
+}: {
+  r: InboxRef
+  canDownload: boolean
+  onOpen: (to: string) => void
+}) {
+  const isFile = r.type === 'file'
+  const ft = isFile ? fileType(r.label, r.mime) : null
+  const tag = ft
+    ? { text: ft.tag, color: ft.color }
+    : { text: r.type === 'page' ? 'PAGE' : 'CONTEXT', color: 'var(--accent)' }
+  const name = r.label?.trim() || `${r.type} ${r.id.slice(-6)}`
+  const inert = r.missing || (isFile && !canDownload)
+  const title = r.missing
+    ? `${name} — deleted since it was referenced`
+    : isFile
+      ? canDownload
+        ? `Download ${name}${r.size !== undefined ? ` (${formatBytes(r.size)})` : ''}`
+        : `${name} — you don't have files.read`
+      : `Open ${r.type} ${name}`
+  const base = sx(
+    `display:inline-flex;align-items:center;gap:7px;max-width:340px;padding:4px 9px 4px 5px;border-radius:7px;border:1px solid var(--border);background:var(--surface);color:var(--ink);text-decoration:none;font:500 12px 'IBM Plex Sans';${inert ? 'opacity:.55;cursor:default;' : 'cursor:pointer;'}`,
+  )
+  const content = (
+    <>
+      <span
+        style={sx(
+          `flex:none;font:700 9.5px 'IBM Plex Mono';letter-spacing:.03em;color:#fff;background:${tag.color};border-radius:4px;padding:2px 5px;`,
+        )}
+      >
+        {tag.text}
+      </span>
+      <span
+        style={sx(
+          `overflow:hidden;text-overflow:ellipsis;white-space:nowrap;${r.missing ? 'text-decoration:line-through;' : ''}`,
+        )}
+      >
+        {name}
+      </span>
+      {isFile && r.size !== undefined && !r.missing && (
+        <span style={sx("flex:none;font:400 10.5px 'IBM Plex Mono';color:var(--muted);")}>
+          {formatBytes(r.size)}
+        </span>
+      )}
+    </>
+  )
+  if (inert) {
+    return (
+      <span data-ref={r.id} title={title} style={base}>
+        {content}
+      </span>
+    )
+  }
+  if (isFile) {
+    // A plain same-origin link: the server 302s to a short-lived presigned URL with an
+    // attachment disposition, so the browser downloads and the SPA stays put.
+    return (
+      <Hov
+        as="a"
+        data-ref={r.id}
+        href={fileContentUrl(r.id, true)}
+        download={r.label ?? undefined}
+        title={title}
+        base={base}
+        hover={sx('border-color:var(--accent);')}
+      >
+        {content}
+      </Hov>
+    )
+  }
+  return (
+    <Hov
+      as="span"
+      data-ref={r.id}
+      title={title}
+      base={base}
+      hover={sx('border-color:var(--accent);')}
+      onClick={() => onOpen(r.type === 'page' ? pageHref(r.id) : `/contexts/${r.id}`)}
+    >
+      {content}
+    </Hov>
   )
 }
 
@@ -630,23 +724,12 @@ function Thread({ num, onChanged }: { num: number; onChanged: () => void }) {
         {view.refs.length > 0 && (
           <div style={sx('display:flex;gap:6px;flex-wrap:wrap;')}>
             {view.refs.map((r) => (
-              <Hov
+              <RefChip
                 key={r.id}
-                as="span"
-                base={sx(
-                  `${chip(false)}border:1px solid var(--border);font-family:'IBM Plex Mono';font-size:11px;`,
-                )}
-                hover={sx('border-color:var(--accent);')}
-                onClick={() =>
-                  r.type === 'page'
-                    ? route.navigate(pageHref(r.id))
-                    : r.type === 'context'
-                      ? route.navigate(`/contexts/${r.id}`)
-                      : route.navigate('/settings')
-                }
-              >
-                {r.type}:{r.id.slice(-6)}
-              </Hov>
+                r={r}
+                canDownload={app.can('files.read')}
+                onOpen={(to) => route.navigate(to)}
+              />
             ))}
           </div>
         )}
