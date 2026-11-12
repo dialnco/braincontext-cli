@@ -1,10 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import {
-  formatNotice,
-  isNewer,
-  planUpdateCheck,
-  updateCheckEnabled,
-} from '../src/lib/updateCheck'
+import { formatNotice, isNewer, planUpdateCheck, updateCheckEnabled } from '../src/lib/updateCheck'
 
 const NOW = Date.parse('2026-11-12T12:00:00Z')
 const hoursAgo = (h: number) => new Date(NOW - h * 3_600_000).toISOString()
@@ -54,7 +49,12 @@ describe('planUpdateCheck', () => {
     expect(first.next).toMatchObject({ notifiedVersion: '0.9.3' })
     const again = planUpdateCheck({ ...cache, ...first.next }, '0.9.2', NOW + 3_600_000, false)
     expect(again.notice).toBeNull()
-    const nextDay = planUpdateCheck({ ...cache, ...first.next }, '0.9.2', NOW + 25 * 3_600_000, false)
+    const nextDay = planUpdateCheck(
+      { ...cache, ...first.next },
+      '0.9.2',
+      NOW + 25 * 3_600_000,
+      false,
+    )
     expect(nextDay.notice).not.toBeNull()
     // A newer release than the one already announced is announced right away.
     const newer = planUpdateCheck({ ...first.next, latest: '0.9.4' }, '0.9.2', NOW, false)
