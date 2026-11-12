@@ -15,6 +15,10 @@ if (Number.isFinite(nodeMajor) && nodeMajor < MIN_NODE_MAJOR) {
 const { ZodError } = await import('zod')
 const { AccessDeniedError } = await import('./core/access/errors')
 const { buildProgram } = await import('./program')
+const { runUpdateCheck } = await import('./lib/updateCheck')
+
+// "A newer bctx is published" — from a daily cache, never blocking (see updateCheck.ts).
+runUpdateCheck()
 
 try {
   await buildProgram().parseAsync(process.argv)

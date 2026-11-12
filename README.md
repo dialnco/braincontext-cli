@@ -65,6 +65,12 @@ engine that works as a plain local file **and** as an embedded replica that sync
 remote primary (see [Projects & online sync](#projects--online-sync)). It ships prebuilt
 binaries, so there is no native compile step.
 
+**Staying current.** Once a day, `bctx` checks npm for a newer release in a detached background
+process, so a command is never slowed down. When a newer release exists, it prints a short
+notice on stderr with the upgrade command (`npm i -g braincontext-cli@latest`) and a link to
+the release notes. Stdout and `--json` output are never touched. The check is off in CI and
+for `bctx mcp`; set `BCTX_NO_UPDATE_CHECK=1` to silence it.
+
 <details>
 <summary>From source</summary>
 
