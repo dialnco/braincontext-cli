@@ -1,4 +1,4 @@
-import { mkdirSync } from 'node:fs'
+import { mkdirSync, readFileSync } from 'node:fs'
 import { dirname } from 'node:path'
 import { type Client, createClient } from '@libsql/client'
 import { LibsqlDialect } from '@libsql/kysely-libsql'
@@ -49,6 +49,7 @@ export interface Store {
   /**
    * Pull the latest frames from the primary; resolves to how many arrived (0 = nothing
    * new, or not a replica) so a caller can skip a refresh when nothing changed.
+   * Measured by the replica's log position (see {@link replicaPosition}).
    */
   sync(): Promise<number>
   /** Tear down Kysely and close the underlying libSQL client. */
@@ -108,8 +109,12 @@ export function openStore(t: DbTarget): Store {
     },
     sync: async () => {
       if (t.mode !== 'replica') return 0
+      const before = replicaPosition(t.file)
       const rep = await client.sync()
-      return rep?.frames_synced ?? 0
+      const after = replicaPosition(t.file)
+      if (!before || !after) return rep?.frames_synced ?? 0
+      if (after.generation !== before.generation) return Math.max(1, after.frame)
+      return Math.max(0, after.frame - before.frame)
     },
     close: async () => {
       await db.destroy()
@@ -119,8 +124,30 @@ export function openStore(t: DbTarget): Store {
 }
 
 /**
+ * Where an embedded replica stands in the primary's log: libSQL persists it next to
+ * the db as `<file>-info` (`{generation, durable_frame_num, …}`). This — not the
+ * sync result — is how we tell whether a sync brought anything: Turso reports
+ * `frames_synced: 1` on every sync, changes or not. Null when the file is missing or
+ * unreadable (callers fall back to `frames_synced`).
+ */
+export function replicaPosition(file: string): { generation: number; frame: number } | null {
+  try {
+    const info = JSON.parse(readFileSync(`${file}-info`, 'utf8')) as {
+      generation?: unknown
+      durable_frame_num?: unknown
+    }
+    const generation = Number(info.generation)
+    const frame = Number(info.durable_frame_num)
+    return Number.isFinite(generation) && Number.isFinite(frame) ? { generation, frame } : null
+  } catch {
+    return null
+  }
+}
+
+/**
  * SQLite `PRAGMA data_version` — increments (as seen by this connection) whenever
- * ANOTHER connection commits to the same database file. Near-zero cost; the studio
+ * ANOTHER connection commits to the same database file. LOCAL files only: an
+ * embedded replica forwards the pragma to the primary, which rejects it. Near-zero cost; the studio
  * polls it to notice agent/CLI writes. Note the counter is per-connection state, so
  * a recycled connection may report a fresh baseline — callers must treat any CHANGE
  * as "maybe modified" (a spurious refetch is cheap), never diff the magnitude.

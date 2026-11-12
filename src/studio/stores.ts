@@ -4,7 +4,7 @@ import type { Client } from '@libsql/client'
 import type { Kysely } from 'kysely'
 import { restrictForSession } from '../core/access/gate'
 import { currentSession } from '../core/access/session'
-import { type DbTarget, openStore, type Store } from '../core/db'
+import { type DbTarget, dataVersion, openStore, type Store } from '../core/db'
 import { inboxTarget } from '../core/inbox/target'
 import type { InboxStore } from '../core/inbox/threads'
 import { migrateToLatest } from '../core/migrate'
@@ -54,6 +54,16 @@ export interface StoreProvider {
   switch(name: string): Promise<ProjectStatus>
   /** Pull from the primary; resolves to the number of frames that arrived. */
   sync(): Promise<number>
+  /**
+   * A cheap "maybe modified" counter the SPA polls (`GET /api/version`) to notice
+   * writes it didn't make. Only a CHANGE is meaningful, never the magnitude.
+   * - local: SQLite `PRAGMA data_version` (bumps on another connection's commit).
+   * - replica: bumps whenever a sync pulls frames. NOT the pragma — an embedded
+   *   replica forwards it to the primary, which rejects it ("SQL not allowed
+   *   statement"), and other members' writes only land here via a sync anyway.
+   * - remote: constant — every read already hits the primary live.
+   */
+  version(): Promise<number>
   close(): Promise<void>
   /**
    * The inbox connection for the current project — the shared primary, opened on
@@ -97,6 +107,8 @@ export async function createStoreManager(opts: DbOpts): Promise<StoreProvider> {
   let name = initialName(opts)
   const noSync = !!opts.noSync
   let chain: Promise<unknown> = Promise.resolve()
+  // Bumped whenever a sync pulls frames — the replica/remote stand-in for data_version.
+  let syncGen = 0
 
   // In-flight data-request counter so a project switch waits for handlers that already
   // captured the old store handle to finish before we close it (avoids destroying a
@@ -175,7 +187,12 @@ export async function createStoreManager(opts: DbOpts): Promise<StoreProvider> {
     },
     // In this connection's write chain: a sync must never overlap an in-flight write
     // transaction on the same client (Studio now syncs on a timer, not just on demand).
-    sync: () => serializeWrite(store.db, () => store.sync()),
+    sync: async () => {
+      const frames = await serializeWrite(store.db, () => store.sync())
+      if (frames > 0) syncGen++
+      return frames
+    },
+    version: async () => (target.mode === 'local' ? dataVersion(store.db) : syncGen),
     close: async () => {
       await closeInbox()
       await store.close()
@@ -205,6 +222,7 @@ export function staticProvider(db: Kysely<Database>, client?: Client): StoreProv
     projects: () => [{ name: 'test', mode: 'local', current: true }],
     switch: async () => ({ project: 'test', mode: 'local', location: ':test:', noSync: true }),
     sync: async () => 0,
+    version: () => dataVersion(db),
     close: async () => undefined,
     enter: () => undefined,
     leave: () => undefined,

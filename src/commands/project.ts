@@ -395,8 +395,12 @@ export function projectCommand(): Command {
       await reachRemote(target.syncUrl, async () => {
         const store = openStore(target)
         try {
-          const rep = await store.client.sync()
-          console.log(`Synced "${n}": ${rep?.frames_synced ?? 0} frame(s).`)
+          const frames = await store.sync()
+          console.log(
+            frames > 0
+              ? `Synced "${n}": ${frames} new frame(s).`
+              : `Synced "${n}": already up to date.`,
+          )
         } finally {
           await store.close()
         }
